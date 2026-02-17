@@ -48,7 +48,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::time::sleep;
@@ -87,6 +87,7 @@ pub struct Opportunity {
     pub price_usd: f64,
     pub liquidity_usd: f64,
     pub volume_h24: f64,
+    pub volume_h1: f64,
     pub price_change_h1: f64,
     /// Timestamp Unix (ms) de création de la paire sur le DEX
     pub pair_created_at: u64,
@@ -173,6 +174,7 @@ struct DexLiquidity {
 #[derive(Debug, Deserialize)]
 struct DexVolume {
     h24: Option<f64>,
+    h1:  Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,21 +189,22 @@ struct DexPriceChange {
 //    • La tâche de fond (watcher) qui écrit les données
 //    • Les handlers HTTP qui lisent les données
 //
-//  Pourquoi Arc<Mutex<Vec<T>>> et pas juste Vec<T> ?
+//  Pourquoi Arc<RwLock<Vec<T>>> pour les opportunités ?
 //
 //    Vec<T> seul → NOT Send : Rust refuse de l'envoyer entre threads.
-//    Mutex<T>   → Send + Sync : garantit l'exclusion mutuelle.
-//    Arc<T>     → permet d'avoir N pointeurs vers le même Mutex
-//                  sans copier la donnée. La mémoire est libérée
-//                  quand le dernier Arc est dropped (RAII).
+//    RwLock<T>   → N lecteurs simultanés OU 1 écrivain exclusif.
+//    Arc<T>      → permet d'avoir N pointeurs vers le même RwLock
+//                  sans copier la donnée.
 //
-//  Alternative plus performante (lectures >> écritures) :
-//    RwLock<T> : N lecteurs simultanés OU 1 écrivain exclusif.
-//    On choisit Mutex ici pour la lisibilité pédagogique.
+//  Les opportunités sont lues par le frontend toutes les 3s mais écrites
+//  seulement toutes les 10s par le watcher → RwLock est plus approprié
+//  que Mutex (qui n'autorise qu'un seul accès à la fois, lecture incluse).
+//
+//  Les logs gardent un Mutex car ils sont écrits très fréquemment (watcher).
 // ════════════════════════════════════════════════════════════════════════════
 
 pub struct AppState {
-    pub opportunities: Arc<Mutex<Vec<Opportunity>>>,
+    pub opportunities: Arc<RwLock<Vec<Opportunity>>>,
     pub logs: Arc<Mutex<Vec<LogEntry>>>,
     pub http_client: Client,
 }
@@ -216,13 +219,11 @@ pub struct AppState {
 /// C'est de la "Dependency Injection" gérée par le framework.
 #[get("/api/opportunities")]
 async fn get_opportunities(data: web::Data<AppState>) -> impl Responder {
-    // .lock() : Acquiert le verrou. Si un autre thread l'a,
-    // on attend qu'il le libère. Renvoie un MutexGuard<Vec<Opportunity>>.
-    //
-    // .unwrap() : Panic si le Mutex est "poisonné" (un thread a paniqué
-    // en tenant le verrou). Acceptable pour un PoC ; en production on
-    // utiliserait .unwrap_or_else(|e| e.into_inner()) pour récupérer.
-    let opportunities = data.opportunities.lock().unwrap();
+    // .read() : Acquiert un verrou de lecture partagé (RwLock).
+    // Plusieurs threads peuvent lire simultanément — aucun n'attend les autres
+    // tant qu'aucun écrivain n'est actif. Idéal ici : le frontend lit toutes
+    // les 3s mais le watcher n'écrit que toutes les 10s.
+    let opportunities = data.opportunities.read().unwrap();
 
     // .clone() : Crée une copie du Vec AVANT de libérer le verrou.
     // Ainsi le verrou est tenu le moins longtemps possible.
@@ -238,6 +239,21 @@ async fn get_logs(data: web::Data<AppState>) -> impl Responder {
     // Les 100 derniers logs, du plus récent au plus ancien
     let recent: Vec<LogEntry> = logs.iter().rev().take(100).cloned().collect();
     HttpResponse::Ok().json(recent)
+}
+
+/// DELETE /api/logs
+///
+/// Vide le buffer de logs en mémoire. Appelé par le bouton "Clear" du frontend.
+#[actix_web::delete("/api/logs")]
+async fn clear_logs(data: web::Data<AppState>) -> impl Responder {
+    let mut logs = data.logs.lock().unwrap();
+    let cleared = logs.len();
+    logs.clear();
+    info!("🗑  Logs cleared ({} entries removed)", cleared);
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "cleared": cleared
+    }))
 }
 
 /// POST /api/snipe/{token_address}
@@ -259,7 +275,7 @@ async fn simulate_snipe(
     // si on réutilise `data` plus loin (même si ce n'est pas le cas ici).
     // C'est une bonne pratique : tenir les verrous le moins longtemps possible.
     {
-        let mut opportunities = data.opportunities.lock().unwrap();
+        let mut opportunities = data.opportunities.write().unwrap();
         if let Some(opp) = opportunities
             .iter_mut()
             .find(|o| o.token_address == token_address)
@@ -325,7 +341,7 @@ async fn simulate_snipe(
 // ════════════════════════════════════════════════════════════════════════════
 
 async fn start_watcher(
-    opportunities: Arc<Mutex<Vec<Opportunity>>>,
+    opportunities: Arc<RwLock<Vec<Opportunity>>>,
     logs: Arc<Mutex<Vec<LogEntry>>>,
     http_client: Client,
 ) {
@@ -428,6 +444,10 @@ async fn start_watcher(
                                             .as_ref()
                                             .and_then(|v| v.h24)
                                             .unwrap_or(0.0),
+                                        volume_h1: p.volume
+                                            .as_ref()
+                                            .and_then(|v| v.h1)
+                                            .unwrap_or(0.0),
                                         price_change_h1: p.price_change
                                             .as_ref()
                                             .and_then(|pc| pc.h1)
@@ -445,7 +465,7 @@ async fn start_watcher(
                             // On acquiert les deux verrous séquentiellement
                             // (jamais en même temps) pour éviter les deadlocks.
                             {
-                                let mut opps = opportunities.lock().unwrap();
+                                let mut opps = opportunities.write().unwrap();
                                 // Ajoute les nouvelles opps en TÊTE de liste
                                 let mut updated = new_opps.clone();
                                 updated.extend(opps.iter().cloned());
@@ -483,6 +503,17 @@ async fn start_watcher(
                     }
                 }
             }
+        }
+
+        // ── Pruning du cache seen_pairs ────────────────────────────────────
+        // Le HashSet grandit indéfiniment si le watcher tourne des heures.
+        // Au-delà de 2000 entrées, on le vide. La fenêtre de 24h sur
+        // pair_created_at empêche la re-détection de paires trop anciennes.
+        if seen_pairs.len() > 2_000 {
+            let count = seen_pairs.len();
+            seen_pairs.clear();
+            push_log(&logs, LogLevel::Warning,
+                format!("♻ Cache seen_pairs rotated — {} entries cleared", count));
         }
 
         // ── Pause de 10 secondes (non-bloquante) ──────────────────────────
@@ -557,7 +588,7 @@ async fn main() -> std::io::Result<()> {
     //
     // Coût mémoire : ~40 bytes pour l'Arc + ~8 bytes pour le Mutex + Vec.
     // Très léger comparé à l'overhead d'un serveur HTTP classique.
-    let opportunities: Arc<Mutex<Vec<Opportunity>>> = Arc::new(Mutex::new(Vec::new()));
+    let opportunities: Arc<RwLock<Vec<Opportunity>>> = Arc::new(RwLock::new(Vec::new()));
     let logs:          Arc<Mutex<Vec<LogEntry>>>    = Arc::new(Mutex::new(Vec::new()));
 
     // Le Client HTTP est thread-safe et conçu pour être réutilisé.
@@ -614,6 +645,7 @@ async fn main() -> std::io::Result<()> {
             // Enregistrement des routes
             .service(get_opportunities)
             .service(get_logs)
+            .service(clear_logs)
             .service(simulate_snipe)
     })
     .bind("0.0.0.0:8080")?

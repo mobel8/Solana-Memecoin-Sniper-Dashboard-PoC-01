@@ -1,5 +1,5 @@
-import { useMemo } from 'react'
-import { Zap, ExternalLink, TrendingUp, TrendingDown, CheckCircle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Zap, ExternalLink, TrendingUp, TrendingDown, CheckCircle, Copy, Check } from 'lucide-react'
 import {
   LineChart, Line, ResponsiveContainer, Tooltip,
 } from 'recharts'
@@ -89,9 +89,18 @@ const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: { valu
 export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowProps) {
   const {
     token_name, token_symbol, token_address, pair_address,
-    price_usd, liquidity_usd, price_change_h1,
+    price_usd, liquidity_usd, volume_h1, price_change_h1,
     pair_created_at, dex_id, detected_at, status,
   } = opportunity
+
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(token_address).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
 
   const isSniped   = status === 'SNIPED'
   const isPositive = price_change_h1 >= 0
@@ -133,6 +142,16 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
           <span className="text-[10px] text-terminal-purple/70 font-mono">
             {token_address.slice(0, 6)}…{token_address.slice(-4)}
           </span>
+          <button
+            onClick={handleCopy}
+            title="Copy address"
+            className="text-terminal-muted/40 hover:text-terminal-blue transition-colors flex-shrink-0"
+          >
+            {copied
+              ? <Check className="w-2.5 h-2.5 text-terminal-green" />
+              : <Copy className="w-2.5 h-2.5" />
+            }
+          </button>
           <span className="text-[10px] text-terminal-muted/50">
             {formatAge(pair_created_at)}
           </span>
@@ -162,12 +181,17 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
         </div>
       </div>
 
-      {/* ── Colonne 3 : Liquidité ────────────────────────────────── */}
+      {/* ── Colonne 3 : Liquidité + Volume 1h ───────────────────── */}
       <div className="flex flex-col gap-0.5">
         <span className="text-sm font-bold text-terminal-blue tabular-nums">
           {formatLiquidity(liquidity_usd)}
         </span>
-        <span className="text-[10px] text-terminal-muted">liquidity</span>
+        <span className="text-[10px] text-terminal-muted">liq</span>
+        {volume_h1 > 0 && (
+          <span className="text-[10px] text-terminal-purple/60 tabular-nums">
+            {formatLiquidity(volume_h1)} vol 1h
+          </span>
+        )}
       </div>
 
       {/* ── Colonne 4 : Variation 1h ─────────────────────────────── */}

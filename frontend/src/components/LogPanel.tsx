@@ -4,6 +4,7 @@ import { LogEntry } from '../App'
 
 interface LogPanelProps {
   logs: LogEntry[]
+  onClearLogs?: () => void
 }
 
 // Couleur selon le niveau de log
@@ -30,7 +31,7 @@ const LEVEL_BG: Record<LogEntry['level'], string> = {
   ERROR:   'bg-terminal-red/[0.06]',
 }
 
-export default function LogPanel({ logs }: LogPanelProps) {
+export default function LogPanel({ logs, onClearLogs }: LogPanelProps) {
   const scrollRef  = useRef<HTMLDivElement>(null)
   const bottomRef  = useRef<HTMLDivElement>(null)
   const isLockedRef = useRef(true) // Auto-scroll activé par défaut
@@ -78,6 +79,16 @@ export default function LogPanel({ logs }: LogPanelProps) {
             <span className="text-terminal-red tabular-nums">{errorCount} ERR</span>
           )}
           <span className="text-terminal-muted tabular-nums">{logs.length} lines</span>
+          {onClearLogs && logs.length > 0 && (
+            <button
+              onClick={onClearLogs}
+              title="Clear logs"
+              className="ml-1 p-0.5 rounded text-terminal-muted hover:text-terminal-red
+                         hover:bg-terminal-red/10 transition-colors"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          )}
         </div>
       </div>
 
