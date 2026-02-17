@@ -2,43 +2,130 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Reset & Base ──────────────────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   THEMES — CSS Custom Properties (format RGB triplets)
+   ────────────────────────────────────────────────────────────────
+   Format  : --c-xxx: R G B  (sans virgules — norme CSS Color 4)
+   Usage   : rgb(var(--c-accent) / 0.5)
+   Tailwind: bg-terminal-green/10 → rgb(var(--c-accent) / 0.1) ✓
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── MATRIX (défaut) ─── Bloomberg Terminal / vert néon sur noir */
+:root,
+[data-theme="matrix"] {
+  --c-bg:     10 14 23;
+  --c-card:   13 19 33;
+  --c-border: 26 37 64;
+  --c-accent: 0 255 136;    /* vert néon */
+  --c-red:    255 68 85;
+  --c-yellow: 255 215 0;
+  --c-blue:   56 189 248;
+  --c-purple: 167 139 250;
+  --c-muted:  74 85 104;
+  --c-text:   203 213 225;
+}
+
+/* ── CYBERPUNK ─── Night City / rose & cyan sur violet profond */
+[data-theme="cyberpunk"] {
+  --c-bg:     13 0 23;
+  --c-card:   19 0 34;
+  --c-border: 80 0 110;
+  --c-accent: 255 45 120;   /* rose hot pink */
+  --c-red:    255 45 120;
+  --c-yellow: 0 229 255;    /* cyan électrique */
+  --c-blue:   190 60 255;   /* violet électrique */
+  --c-purple: 180 80 255;
+  --c-muted:  110 55 135;
+  --c-text:   224 200 245;
+}
+
+/* ── MIDNIGHT ─── Ocean Dark / or & bleu électrique sur navy */
+[data-theme="midnight"] {
+  --c-bg:     5 13 26;
+  --c-card:   7 20 40;
+  --c-border: 20 50 90;
+  --c-accent: 240 192 64;   /* or */
+  --c-red:    255 75 75;
+  --c-yellow: 240 192 64;
+  --c-blue:   74 174 255;   /* bleu électrique */
+  --c-purple: 150 120 255;
+  --c-muted:  60 90 130;
+  --c-text:   200 220 245;
+}
+
+/* ── BLOOD MARKET ─── War Room / orange brûlé sur noir sang */
+[data-theme="blood"] {
+  --c-bg:     12 8 8;
+  --c-card:   17 14 14;
+  --c-border: 60 20 20;
+  --c-accent: 255 107 43;   /* orange brûlé */
+  --c-red:    220 30 30;
+  --c-yellow: 255 200 0;
+  --c-blue:   200 130 100;
+  --c-purple: 200 80 80;
+  --c-muted:  100 65 65;
+  --c-text:   230 210 205;
+}
+
+/* ── GHOST ─── Clean Light / indigo sur blanc glacé */
+[data-theme="ghost"] {
+  --c-bg:     240 244 248;
+  --c-card:   255 255 255;
+  --c-border: 200 210 220;
+  --c-accent: 99 102 241;   /* indigo */
+  --c-red:    239 68 68;
+  --c-yellow: 202 138 4;
+  --c-blue:   59 130 246;
+  --c-purple: 139 92 246;
+  --c-muted:  148 163 184;
+  --c-text:   30 41 59;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   RESET & BASE
+   ════════════════════════════════════════════════════════════════ */
+
 *, *::before, *::after {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  background-color: #0a0e17;
-  color: #cbd5e1;
+  background-color: rgb(var(--c-bg));
+  color: rgb(var(--c-text));
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Custom Scrollbar (style terminal) ─────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   CUSTOM SCROLLBAR
+   ════════════════════════════════════════════════════════════════ */
+
 ::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: #0a0e17;
+  background: rgb(var(--c-bg));
 }
 ::-webkit-scrollbar-thumb {
-  background: #1a2540;
+  background: rgb(var(--c-border));
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2a3560;
+  background: rgb(var(--c-muted));
 }
 
-/* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #1a2540 #0a0e17;
+  scrollbar-color: rgb(var(--c-border)) rgb(var(--c-bg));
 }
 
-/* ── Animations ─────────────────────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ════════════════════════════════════════════════════════════════ */
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0; }
@@ -50,32 +137,56 @@ body {
 }
 
 @keyframes scanline {
-  0%   { transform: translateY(-100%); opacity: 0.3; }
-  50%  { opacity: 0.1; }
-  100% { transform: translateY(100vh); opacity: 0; }
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
 }
 
 .animate-blink    { animation: blink 1s step-end infinite; }
 .animate-slide-in { animation: slideIn 0.25s ease-out; }
 
-/* ── Glow text effect ───────────────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════
+   GLOW TEXT — suit la couleur accent du thème courant
+   ════════════════════════════════════════════════════════════════ */
+
 .text-glow-green {
-  text-shadow: 0 0 8px rgba(0, 255, 136, 0.8), 0 0 20px rgba(0, 255, 136, 0.4);
+  text-shadow:
+    0 0  8px rgb(var(--c-accent) / 0.8),
+    0 0 20px rgb(var(--c-accent) / 0.4);
 }
 
-/* ── Scanline overlay (optionnel — effet CRT) ──────────────── */
+/* Pas de glow sur fond clair (GHOST) */
+[data-theme="ghost"] .text-glow-green {
+  text-shadow: none;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SCANLINE OVERLAY — effet CRT, couleur accent du thème
+   ════════════════════════════════════════════════════════════════ */
+
 .scanline-overlay::before {
   content: '';
   position: fixed;
   top: 0; left: 0; right: 0;
   height: 2px;
-  background: linear-gradient(transparent, rgba(0, 255, 136, 0.08), transparent);
+  background: linear-gradient(
+    transparent,
+    rgb(var(--c-accent) / 0.08),
+    transparent
+  );
   animation: scanline 8s linear infinite;
   pointer-events: none;
   z-index: 9999;
 }
 
-/* ── Number tabular alignment ───────────────────────────────── */
+/* Désactivé sur le thème clair */
+[data-theme="ghost"] .scanline-overlay::before {
+  display: none;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   UTILITIES
+   ════════════════════════════════════════════════════════════════ */
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }

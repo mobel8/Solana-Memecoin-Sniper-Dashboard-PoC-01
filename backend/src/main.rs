@@ -88,7 +88,20 @@ pub struct Opportunity {
     pub liquidity_usd: f64,
     pub volume_h24: f64,
     pub volume_h1: f64,
-    pub price_change_h1: f64,
+    pub price_change_m5:  f64,
+    pub price_change_h1:  f64,
+    pub price_change_h6:  f64,
+    pub price_change_h24: f64,
+    pub volume_h6:        f64,
+    /// Market cap en USD (peut être 0 si non disponible)
+    pub market_cap:       f64,
+    /// Fully Diluted Valuation en USD
+    pub fdv:              f64,
+    /// Transactions (achats / ventes) sur les dernières 1h et 24h
+    pub txns_h1_buys:     u64,
+    pub txns_h1_sells:    u64,
+    pub txns_h24_buys:    u64,
+    pub txns_h24_sells:   u64,
     /// Timestamp Unix (ms) de création de la paire sur le DEX
     pub pair_created_at: u64,
     /// Heure de détection par notre watcher (format HH:MM:SS)
@@ -154,6 +167,13 @@ struct DexPair {
     #[serde(rename = "priceChange")]
     price_change: Option<DexPriceChange>,
 
+    txns: Option<DexTxns>,
+
+    #[serde(rename = "marketCap")]
+    market_cap: Option<f64>,
+
+    fdv: Option<f64>,
+
     /// Timestamp Unix en millisecondes de création de la paire
     #[serde(rename = "pairCreatedAt")]
     pair_created_at: Option<u64>,
@@ -174,12 +194,28 @@ struct DexLiquidity {
 #[derive(Debug, Deserialize)]
 struct DexVolume {
     h24: Option<f64>,
+    h6:  Option<f64>,
     h1:  Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DexPriceChange {
-    h1: Option<f64>,
+    m5:  Option<f64>,
+    h1:  Option<f64>,
+    h6:  Option<f64>,
+    h24: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DexTxns {
+    h1:  Option<DexTxnCount>,
+    h24: Option<DexTxnCount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DexTxnCount {
+    buys:  Option<u64>,
+    sells: Option<u64>,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -444,14 +480,48 @@ async fn start_watcher(
                                             .as_ref()
                                             .and_then(|v| v.h24)
                                             .unwrap_or(0.0),
+                                        volume_h6: p.volume
+                                            .as_ref()
+                                            .and_then(|v| v.h6)
+                                            .unwrap_or(0.0),
                                         volume_h1: p.volume
                                             .as_ref()
                                             .and_then(|v| v.h1)
+                                            .unwrap_or(0.0),
+                                        price_change_m5: p.price_change
+                                            .as_ref()
+                                            .and_then(|pc| pc.m5)
                                             .unwrap_or(0.0),
                                         price_change_h1: p.price_change
                                             .as_ref()
                                             .and_then(|pc| pc.h1)
                                             .unwrap_or(0.0),
+                                        price_change_h6: p.price_change
+                                            .as_ref()
+                                            .and_then(|pc| pc.h6)
+                                            .unwrap_or(0.0),
+                                        price_change_h24: p.price_change
+                                            .as_ref()
+                                            .and_then(|pc| pc.h24)
+                                            .unwrap_or(0.0),
+                                        market_cap: p.market_cap.unwrap_or(0.0),
+                                        fdv:        p.fdv.unwrap_or(0.0),
+                                        txns_h1_buys: p.txns.as_ref()
+                                            .and_then(|t| t.h1.as_ref())
+                                            .and_then(|c| c.buys)
+                                            .unwrap_or(0),
+                                        txns_h1_sells: p.txns.as_ref()
+                                            .and_then(|t| t.h1.as_ref())
+                                            .and_then(|c| c.sells)
+                                            .unwrap_or(0),
+                                        txns_h24_buys: p.txns.as_ref()
+                                            .and_then(|t| t.h24.as_ref())
+                                            .and_then(|c| c.buys)
+                                            .unwrap_or(0),
+                                        txns_h24_sells: p.txns.as_ref()
+                                            .and_then(|t| t.h24.as_ref())
+                                            .and_then(|c| c.sells)
+                                            .unwrap_or(0),
                                         pair_created_at: p.pair_created_at.unwrap_or(0),
                                         detected_at: Utc::now()
                                             .format("%H:%M:%S")
@@ -635,7 +705,7 @@ async fn main() -> std::io::Result<()> {
             .allowed_origin("http://localhost:3000")
             .allowed_origin("http://127.0.0.1:3000")
             .allowed_origin("http://localhost:5173") // Vite dev par défaut
-            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+            .allowed_methods(vec!["GET", "POST", "DELETE", "OPTIONS"])
             .allow_any_header()
             .max_age(3600);
 

@@ -3,6 +3,8 @@ import { Zap, Wifi, WifiOff, RefreshCw, SlidersHorizontal } from 'lucide-react'
 import TokenRow from './components/TokenRow'
 import LogPanel from './components/LogPanel'
 import StatsHeader from './components/StatsHeader'
+import ThemeSwitcher from './components/ThemeSwitcher'
+import { ThemeId, DEFAULT_THEME } from './themes'
 
 // ════════════════════════════════════════════════════════════════
 //  TYPES (miroir du modèle Rust — doit correspondre exactement
@@ -19,8 +21,18 @@ export interface Opportunity {
   price_usd: number
   liquidity_usd: number
   volume_h24: number
+  volume_h6: number
   volume_h1: number
-  price_change_h1: number
+  price_change_m5:  number
+  price_change_h1:  number
+  price_change_h6:  number
+  price_change_h24: number
+  market_cap: number
+  fdv: number
+  txns_h1_buys:  number
+  txns_h1_sells: number
+  txns_h24_buys:  number
+  txns_h24_sells: number
   pair_created_at: number
   detected_at: string
   status: 'DETECTED' | 'SNIPED' | 'MISSED'
@@ -45,6 +57,17 @@ export default function App() {
   const [isRefreshing,  setIsRefreshing]  = useState(false)
   // Token actuellement en cours de "snipe" (affiche l'animation)
   const [snipingToken,  setSnipingToken]  = useState<string | null>(null)
+
+  // ── Thème (persisté dans localStorage) ─────────────────────────
+  const [theme, setTheme] = useState<ThemeId>(
+    () => (localStorage.getItem('sniper-theme') as ThemeId) || DEFAULT_THEME
+  )
+
+  // Applique le thème sur <html data-theme="..."> à chaque changement
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('sniper-theme', theme)
+  }, [theme])
 
   // ── Récupération des données depuis le backend Rust ────────────
   // useCallback mémoïse la fonction pour éviter de recréer l'interval
@@ -208,6 +231,9 @@ export default function App() {
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
               Refresh
             </button>
+
+            {/* Sélecteur de thème */}
+            <ThemeSwitcher currentTheme={theme} onThemeChange={setTheme} />
 
             {/* Indicateur Rust backend */}
             <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded

@@ -8,18 +8,20 @@ export default {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'Cascadia Code', 'Consolas', 'monospace'],
       },
       colors: {
-        // Palette "Terminal Financier / Bloomberg Dark"
+        // Palette thémable via CSS custom properties (RGB triplets)
+        // <alpha-value> est remplacé par Tailwind pour les modificateurs /10, /50, etc.
+        // ex: bg-terminal-green/10 → rgb(var(--c-accent) / 0.1)
         terminal: {
-          bg:     '#0a0e17',   // Fond principal — noir quasi-pur
-          card:   '#0d1321',   // Fond des cartes/panneaux — légèrement plus clair
-          border: '#1a2540',   // Bordures — bleu nuit discret
-          green:  '#00ff88',   // Vert néon — profits, succès, live
-          red:    '#ff4455',   // Rouge vif — pertes, erreurs
-          yellow: '#ffd700',   // Or — prix, avertissements
-          blue:   '#38bdf8',   // Bleu clair — métriques neutres
-          purple: '#a78bfa',   // Violet — identifiants, adresses
-          muted:  '#4a5568',   // Texte secondaire grisé
-          text:   '#cbd5e1',   // Texte principal — gris clair lisible
+          bg:     'rgb(var(--c-bg)     / <alpha-value>)',
+          card:   'rgb(var(--c-card)   / <alpha-value>)',
+          border: 'rgb(var(--c-border) / <alpha-value>)',
+          green:  'rgb(var(--c-accent) / <alpha-value>)',
+          red:    'rgb(var(--c-red)    / <alpha-value>)',
+          yellow: 'rgb(var(--c-yellow) / <alpha-value>)',
+          blue:   'rgb(var(--c-blue)   / <alpha-value>)',
+          purple: 'rgb(var(--c-purple) / <alpha-value>)',
+          muted:  'rgb(var(--c-muted)  / <alpha-value>)',
+          text:   'rgb(var(--c-text)   / <alpha-value>)',
         },
       },
       animation: {
@@ -34,8 +36,8 @@ export default {
           '50%':      { opacity: '0' },
         },
         glow: {
-          '0%, 100%': { textShadow: '0 0 8px rgba(0,255,136,0.8)' },
-          '50%':      { textShadow: '0 0 20px rgba(0,255,136,1), 0 0 40px rgba(0,255,136,0.5)' },
+          '0%, 100%': { textShadow: '0 0 8px rgb(var(--c-accent) / 0.8)' },
+          '50%':      { textShadow: '0 0 20px rgb(var(--c-accent) / 1), 0 0 40px rgb(var(--c-accent) / 0.5)' },
         },
         slideIn: {
           from: { opacity: '0', transform: 'translateY(-8px)' },
@@ -43,8 +45,8 @@ export default {
         },
       },
       boxShadow: {
-        'green-glow': '0 0 15px rgba(0, 255, 136, 0.2)',
-        'card':       '0 0 0 1px rgba(26, 37, 64, 0.8)',
+        'green-glow': '0 0 15px rgb(var(--c-accent) / 0.2)',
+        'card':       '0 0 0 1px rgb(var(--c-border) / 0.8)',
       },
     },
   },
