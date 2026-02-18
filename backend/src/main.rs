@@ -1237,9 +1237,11 @@ async fn main() -> std::io::Result<()> {
         env_logger::Env::default().default_filter_or("info")
     );
 
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+
     info!("╔══════════════════════════════════════╗");
     info!("║   SOLANA MEMECOIN SNIPER BACKEND     ║");
-    info!("║   Listening on http://0.0.0.0:8080   ║");
+    info!("║   Listening on http://0.0.0.0:{}   ║", port);
     info!("╚══════════════════════════════════════╝");
 
     // ── Initialisation de l'état partagé ──────────────────────────────────
@@ -1287,13 +1289,23 @@ async fn main() -> std::io::Result<()> {
         // CORS : Autorise le frontend React (localhost:3000) à appeler notre
         // API malgré la Same-Origin Policy des navigateurs.
         // En production, on remplacerait par le domaine du frontend.
-        let cors = Cors::default()
-            .allowed_origin("http://localhost:3000")
-            .allowed_origin("http://127.0.0.1:3000")
-            .allowed_origin("http://localhost:5173") // Vite dev par défaut
-            .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-            .allow_any_header()
-            .max_age(3600);
+        // CORS_ORIGIN peut être défini sur Railway pour restreindre l'accès
+        // au domaine Vercel exact. Si absent, on accepte toutes origines (PoC).
+        let cors = if let Ok(origin) = std::env::var("CORS_ORIGIN") {
+            Cors::default()
+                .allowed_origin(&origin)
+                .allowed_origin("http://localhost:3000")
+                .allowed_origin("http://localhost:5173")
+                .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                .allow_any_header()
+                .max_age(3600)
+        } else {
+            Cors::default()
+                .allow_any_origin()
+                .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                .allow_any_header()
+                .max_age(3600)
+        };
 
         App::new()
             .wrap(cors)
@@ -1313,7 +1325,7 @@ async fn main() -> std::io::Result<()> {
             // Snipe History
             .service(get_snipe_history)
     })
-    .bind("0.0.0.0:8080")?
+    .bind(format!("0.0.0.0:{}", port))?
     .workers(2) // 2 worker threads Actix (suffisant pour un PoC)
     .run()
     .await

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Zap, Wifi, WifiOff, RefreshCw, SlidersHorizontal, Shield } from 'lucide-react'
 import TokenRow from './components/TokenRow'
 import LogPanel from './components/LogPanel'
@@ -8,102 +8,42 @@ import TokenDetail from './components/TokenDetail'
 import NetworkBar from './components/NetworkBar'
 import JitoPanel from './components/JitoPanel'
 import { ThemeId, DEFAULT_THEME } from './themes'
+import {
+  type Opportunity,
+  type LogEntry,
+  type JitoConfig,
+  type NetworkStats,
+  DEFAULT_JITO_CONFIG,
+  DEFAULT_NETWORK_STATS,
+  fetchNewOpportunities,
+  simulateNetworkStats,
+} from './lib/api'
+
+// Re-export pour les composants qui importent depuis '../App'
+export type { Opportunity, LogEntry, JitoConfig, NetworkStats }
+export type { RiskFlag, RiskScore } from './lib/types'
 
 // ════════════════════════════════════════════════════════════════
-//  TYPES (miroir du modèle Rust — doit correspondre exactement
-//  à ce que le backend sérialise en JSON)
+//  Helpers
 // ════════════════════════════════════════════════════════════════
 
-export interface Opportunity {
-  id: string
-  token_name: string
-  token_symbol: string
-  token_address: string
-  pair_address: string
-  dex_id: string
-  price_usd: number
-  liquidity_usd: number
-  volume_h24: number
-  volume_h6: number
-  volume_h1: number
-  price_change_m5:  number
-  price_change_h1:  number
-  price_change_h6:  number
-  price_change_h24: number
-  market_cap: number
-  fdv: number
-  txns_h1_buys:  number
-  txns_h1_sells: number
-  txns_h24_buys:  number
-  txns_h24_sells: number
-  pair_created_at: number
-  detected_at: string
-  status: 'DETECTED' | 'SNIPED' | 'MISSED'
-  risk_score: RiskScore | null
+function uid(): string {
+  return crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)
 }
 
-export interface LogEntry {
-  id: string
-  timestamp: string
-  level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR'
-  message: string
+function now(): string {
+  return new Date().toLocaleTimeString('fr-FR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 } as Intl.DateTimeFormatOptions)
 }
 
-// ── Types Jito Bundles ──────────────────────────────────────────
-export interface JitoConfig {
-  tip_min_sol: number
-  tip_max_sol: number
-  block_engine: string
-  tip_strategy: string
-  max_txns_per_bundle: number
-  slippage_bps: number
-  anti_sandwich: boolean
-  compute_unit_limit: number
-  priority_fee_micro_lamports: number
-}
-
-// ── Types Network Stats ─────────────────────────────────────────
-export interface NetworkStats {
-  tps: number
-  current_slot: number
-  epoch: number
-  priority_fee_estimate: number
-  congestion_level: string
-  active_validators: number
-  sol_price_usd: number
-  last_updated: string
-}
-
-// ── Types Risk Score ────────────────────────────────────────────
-export interface RiskFlag {
-  name: string
-  severity: string
-  description: string
-  passed: boolean
-}
-
-export interface RiskScore {
-  score: number
-  level: string
-  flags: RiskFlag[]
-}
-
-// ── Types Snipe History ─────────────────────────────────────────
-export interface SnipeHistoryEntry {
-  id: string
-  timestamp: string
-  token_symbol: string
-  token_address: string
-  action: string
-  amount_sol: number
-  price_usd: number
-  tip_sol: number
-  bundle_id: string
-  block_engine: string
-  landing_slot: number
-  status: string
-  pnl_pct: number
-  simulation: boolean
+function pushLog(
+  setLogs: React.Dispatch<React.SetStateAction<LogEntry[]>>,
+  level: LogEntry['level'],
+  message: string,
+) {
+  setLogs(prev => {
+    const next = [...prev, { id: uid(), timestamp: now(), level, message }]
+    return next.length > 500 ? next.slice(-500) : next
+  })
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -116,108 +56,123 @@ export default function App() {
   const [isConnected,   setIsConnected]   = useState(false)
   const [lastUpdate,    setLastUpdate]    = useState<string>('')
   const [isRefreshing,  setIsRefreshing]  = useState(false)
-  // Token actuellement en cours de "snipe" (affiche l'animation)
   const [snipingToken,  setSnipingToken]  = useState<string | null>(null)
-  // Navigation vers la page de détail
   const [detailAddress, setDetailAddress] = useState<string | null>(null)
 
   // ── Données infrastructure ─────────────────────────────────────
-  const [networkStats, setNetworkStats] = useState<NetworkStats | null>(null)
-  const [jitoConfig,   setJitoConfig]   = useState<JitoConfig | null>(null)
+  const [networkStats, setNetworkStats] = useState<NetworkStats>(DEFAULT_NETWORK_STATS)
+  const [jitoConfig,   setJitoConfig]   = useState<JitoConfig>(DEFAULT_JITO_CONFIG)
   const [showJitoPanel, setShowJitoPanel] = useState(false)
 
-  // ── Thème (persisté dans localStorage) ─────────────────────────
+  // ── Thème ─────────────────────────────────────────────────────
   const [theme, setTheme] = useState<ThemeId>(
     () => (localStorage.getItem('sniper-theme') as ThemeId) || DEFAULT_THEME
   )
 
-  // Applique le thème sur <html data-theme="..."> à chaque changement
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('sniper-theme', theme)
   }, [theme])
 
-  // ── Récupération des données depuis le backend Rust ────────────
-  // useCallback mémoïse la fonction pour éviter de recréer l'interval
-  // à chaque re-render (dépendances vides → stable pour toute la vie du composant)
+  // ── Seen pairs cache (persist across renders) ─────────────────
+  const seenPairsRef = useRef(new Set<string>())
+
+  // ── Watcher: fetch DexScreener toutes les 10s ─────────────────
   const fetchData = useCallback(async () => {
-    try {
-      // Promise.all : exécute les fetch EN PARALLÈLE (pas séquentiel)
-      const [oppsRes, logsRes, netRes, jitoRes] = await Promise.all([
-        fetch('/api/opportunities'),
-        fetch('/api/logs'),
-        fetch('/api/network'),
-        fetch('/api/jito/config'),
-      ])
+    pushLog(setLogs, 'INFO', `Polling DexScreener...`)
 
-      if (oppsRes.ok && logsRes.ok) {
-        const [oppsData, logsData]: [Opportunity[], LogEntry[]] = await Promise.all([
-          oppsRes.json(),
-          logsRes.json(),
-        ])
-        setOpportunities(oppsData)
-        setLogs(logsData)
-        setIsConnected(true)
-        setLastUpdate(new Date().toLocaleTimeString('fr-FR', { hour12: false }))
-      } else {
-        setIsConnected(false)
-      }
+    const result = await fetchNewOpportunities(seenPairsRef.current)
 
-      if (netRes.ok)  setNetworkStats(await netRes.json())
-      if (jitoRes.ok) setJitoConfig(await jitoRes.json())
-    } catch {
+    if (result.error) {
       setIsConnected(false)
+      pushLog(setLogs, 'ERROR', `Network error: ${result.error}`)
+      return
+    }
+
+    setIsConnected(true)
+    setLastUpdate(new Date().toLocaleTimeString('fr-FR', { hour12: false }))
+
+    if (result.newOpportunities.length === 0) {
+      pushLog(setLogs, 'INFO', `No new opportunities [query=${result.query}]. Watching...`)
+    } else {
+      // Ajouter en tête, garder max 50
+      setOpportunities(prev => {
+        const updated = [...result.newOpportunities, ...prev]
+        return updated.slice(0, 50)
+      })
+
+      for (const opp of result.newOpportunities) {
+        const short = `${opp.token_address.slice(0, 6)}...${opp.token_address.slice(-4)}`
+        pushLog(setLogs, 'SUCCESS',
+          `NEW POOL: ${opp.token_symbol} (${opp.dex_id}) | Liq $${Math.round(opp.liquidity_usd)} | $${opp.price_usd.toFixed(8)} | ${short}`
+        )
+      }
     }
   }, [])
 
-  // Polling toutes les 3 secondes pour le dashboard "live"
+  // Polling DexScreener toutes les 10s
   useEffect(() => {
+    pushLog(setLogs, 'INFO', 'Watcher initialized — polling DexScreener every 10s')
+    pushLog(setLogs, 'INFO', 'Connecting to DexScreener public API...')
+    pushLog(setLogs, 'SUCCESS', 'Connection established')
+
     fetchData()
-    const id = setInterval(fetchData, 3000)
-    return () => clearInterval(id) // Cleanup au démontage du composant
+    const id = setInterval(fetchData, 10_000)
+    return () => clearInterval(id)
   }, [fetchData])
 
-  // ── Handler SNIPE ───────────────────────────────────────────────
-  const handleSnipe = async (tokenAddress: string) => {
-    setSnipingToken(tokenAddress)
-    try {
-      const res = await fetch(`/api/snipe/${tokenAddress}`, { method: 'POST' })
-      if (res.ok) {
-        // Refresh immédiat pour voir le nouveau statut SNIPED
-        await fetchData()
-      }
-    } finally {
-      // Toujours réinitialiser l'état sniping, même en cas d'erreur
-      setTimeout(() => setSnipingToken(null), 1500)
-    }
-  }
+  // ── Network stats simulation toutes les 30s ───────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      setNetworkStats(prev => simulateNetworkStats(prev))
+    }, 30_000)
+    return () => clearInterval(id)
+  }, [])
 
-  // ── Refresh manuel ──────────────────────────────────────────────
-  const handleManualRefresh = async () => {
+  // ── Handler SNIPE (100% client-side) ──────────────────────────
+  const handleSnipe = useCallback((tokenAddress: string) => {
+    setSnipingToken(tokenAddress)
+
+    // Mettre à jour le statut
+    setOpportunities(prev =>
+      prev.map(o => o.token_address === tokenAddress ? { ...o, status: 'SNIPED' as const } : o)
+    )
+
+    // Générer les logs de simulation
+    const short = `${tokenAddress.slice(0, 8)}...${tokenAddress.slice(-4)}`
+    const fakeSig = `${uid().slice(0, 8)}...${uid().slice(0, 8)}`
+
+    pushLog(setLogs, 'INFO', `SNIPE initiated → ${short}`)
+    pushLog(setLogs, 'INFO', 'Constructing Jito Bundle (1 tx)...')
+    pushLog(setLogs, 'INFO', 'Estimating optimal tip → 0.001 SOL (~$0.14)')
+    pushLog(setLogs, 'INFO', 'Signing transaction with keypair...')
+    pushLog(setLogs, 'INFO', `Submitting to Jito Block Engine (${jitoConfig.block_engine})...`)
+
+    setTimeout(() => {
+      pushLog(setLogs, 'SUCCESS', `Bundle accepted | Sig: ${fakeSig}`)
+      pushLog(setLogs, 'SUCCESS', '[SIMULATION] No real funds were used.')
+      setSnipingToken(null)
+    }, 1500)
+  }, [jitoConfig.block_engine])
+
+  // ── Refresh manuel ────────────────────────────────────────────
+  const handleManualRefresh = useCallback(async () => {
     setIsRefreshing(true)
     await fetchData()
     setTimeout(() => setIsRefreshing(false), 500)
-  }
+  }, [fetchData])
 
-  // ── Clear logs ──────────────────────────────────────────────────
-  const clearLogs = useCallback(async () => {
-    await fetch('/api/logs', { method: 'DELETE' })
-    setLogs([])
+  // ── Clear logs ────────────────────────────────────────────────
+  const clearLogs = useCallback(() => setLogs([]), [])
+
+  // ── Update Jito config (local) ────────────────────────────────
+  const updateJitoConfig = useCallback((newConfig: JitoConfig) => {
+    setJitoConfig(newConfig)
+    pushLog(setLogs, 'INFO',
+      `Jito config updated → strategy=${newConfig.tip_strategy}, tip=${newConfig.tip_min_sol}-${newConfig.tip_max_sol} SOL`)
   }, [])
 
-  // ── Update Jito config ────────────────────────────────────────
-  const updateJitoConfig = useCallback(async (newConfig: JitoConfig) => {
-    const res = await fetch('/api/jito/config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newConfig),
-    })
-    if (res.ok) {
-      setJitoConfig(newConfig)
-    }
-  }, [])
-
-  // ── Filtre / Tri ────────────────────────────────────────────────
+  // ── Filtre / Tri ──────────────────────────────────────────────
   type FilterStatus = 'ALL' | 'DETECTED' | 'SNIPED'
   type SortKey = 'newest' | 'change_desc' | 'change_asc' | 'liq_desc' | 'vol_desc'
 
@@ -225,7 +180,6 @@ export default function App() {
   const [sortBy,       setSortBy]       = useState<SortKey>('newest')
   const [filterDex,    setFilterDex]    = useState<string>('ALL')
 
-  // Liste unique de DEX pour le sélecteur
   const dexOptions = useMemo(() => {
     const ids = new Set(opportunities.map(o => o.dex_id).filter(Boolean))
     return ['ALL', ...Array.from(ids).sort()]
@@ -242,12 +196,10 @@ export default function App() {
       case 'change_asc':  result.sort((a, b) => a.price_change_h1 - b.price_change_h1); break
       case 'liq_desc':    result.sort((a, b) => b.liquidity_usd   - a.liquidity_usd);   break
       case 'vol_desc':    result.sort((a, b) => b.volume_h1       - a.volume_h1);       break
-      // newest : l'ordre du backend (les plus récents en premier) est conservé
     }
     return result
   }, [opportunities, filterStatus, sortBy, filterDex])
 
-  // ── Statistiques calculées ──────────────────────────────────────
   const stats = {
     total:    opportunities.length,
     sniped:   opportunities.filter(o => o.status === 'SNIPED').length,
@@ -258,11 +210,11 @@ export default function App() {
   //  RENDU
   // ════════════════════════════════════════════════════════════════
 
-  // Page de détail d'un token
   if (detailAddress) {
     return (
       <TokenDetail
         tokenAddress={detailAddress}
+        opportunities={opportunities}
         onBack={() => setDetailAddress(null)}
         onSnipe={handleSnipe}
         isSniping={snipingToken === detailAddress}
@@ -273,11 +225,9 @@ export default function App() {
   return (
     <div className="min-h-screen bg-terminal-bg font-mono text-terminal-text scanline-overlay">
 
-      {/* ── HEADER BARRE SUPÉRIEURE ─────────────────────────────── */}
+      {/* ── HEADER ─────────────────────────────────── */}
       <header className="sticky top-0 z-50 border-b border-terminal-border bg-terminal-card/95 backdrop-blur-sm">
         <div className="flex items-center justify-between px-6 py-3 max-w-[1920px] mx-auto">
-
-          {/* Logo / Titre */}
           <div className="flex items-center gap-3">
             <div className="relative">
               <Zap className="w-6 h-6 text-terminal-green" />
@@ -293,9 +243,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Status & Controls */}
           <div className="flex items-center gap-5">
-            {/* Indicateur connexion */}
             <div className="flex items-center gap-1.5">
               {isConnected
                 ? <Wifi    className="w-4 h-4 text-terminal-green" />
@@ -309,14 +257,12 @@ export default function App() {
               )}
             </div>
 
-            {/* Dernière mise à jour */}
             {lastUpdate && (
               <span className="text-terminal-muted text-xs hidden sm:block">
                 Updated {lastUpdate}
               </span>
             )}
 
-            {/* Bouton refresh manuel */}
             <button
               onClick={handleManualRefresh}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-terminal-border
@@ -327,7 +273,6 @@ export default function App() {
               Refresh
             </button>
 
-            {/* Jito Config */}
             <button
               onClick={() => setShowJitoPanel(!showJitoPanel)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs transition-colors ${
@@ -340,31 +285,26 @@ export default function App() {
               Jito
             </button>
 
-            {/* Sélecteur de thème */}
             <ThemeSwitcher currentTheme={theme} onThemeChange={setTheme} />
 
-            {/* Indicateur Rust backend */}
             <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded
                             border border-terminal-border/50 text-xs">
               <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-terminal-green' : 'bg-terminal-red'}`} />
-              <span className="text-terminal-muted">Rust :8080</span>
+              <span className="text-terminal-muted">Vercel</span>
             </div>
           </div>
         </div>
       </header>
 
-      {/* ── BARRE DE STATISTIQUES ───────────────────────────────── */}
       <StatsHeader stats={stats} />
 
-      {/* ── BARRE RÉSEAU SOLANA ──────────────────────────────────── */}
-      {networkStats && <NetworkBar stats={networkStats} />}
+      <NetworkBar stats={networkStats} />
 
-      {/* ── PANEL JITO CONFIG (collapsible) ──────────────────────── */}
-      {showJitoPanel && jitoConfig && (
+      {showJitoPanel && (
         <JitoPanel config={jitoConfig} onUpdate={updateJitoConfig} />
       )}
 
-      {/* ── BARRE FILTRE / TRI ──────────────────────────────────── */}
+      {/* ── BARRE FILTRE / TRI ────────────────────────────────── */}
       <div className="border-b border-terminal-border bg-terminal-bg/40 px-4 py-2">
         <div className="max-w-[1920px] mx-auto flex flex-wrap gap-x-5 gap-y-2 items-center text-xs">
           <div className="flex items-center gap-1.5 text-terminal-muted">
@@ -372,7 +312,6 @@ export default function App() {
             <span className="text-[10px] uppercase tracking-widest">Filters</span>
           </div>
 
-          {/* Status */}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-terminal-muted uppercase tracking-widest">Status</span>
             <div className="flex gap-1">
@@ -389,7 +328,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Sort */}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-terminal-muted uppercase tracking-widest">Sort</span>
             <select value={sortBy} onChange={e => setSortBy(e.target.value as SortKey)}
@@ -403,7 +341,6 @@ export default function App() {
             </select>
           </div>
 
-          {/* DEX */}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-terminal-muted uppercase tracking-widest">DEX</span>
             <select value={filterDex} onChange={e => setFilterDex(e.target.value)}
@@ -419,14 +356,11 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── CONTENU PRINCIPAL ───────────────────────────────────── */}
+      {/* ── CONTENU PRINCIPAL ─────────────────────────────────── */}
       <main className="max-w-[1920px] mx-auto p-4 flex flex-col xl:flex-row gap-4">
 
-        {/* Panel gauche : liste des opportunités (66%) */}
         <section className="flex-1 min-w-0">
           <div className="border border-terminal-border rounded-lg bg-terminal-card overflow-hidden">
-
-            {/* En-tête du panel */}
             <div className="flex items-center justify-between px-5 py-3 border-b border-terminal-border bg-terminal-bg/30">
               <div className="flex items-center gap-2.5">
                 <div className="flex gap-1">
@@ -447,7 +381,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Ligne d'en-tête du tableau */}
             <div className="hidden md:grid grid-cols-[minmax(140px,1.5fr)_minmax(120px,1fr)_minmax(100px,1fr)_minmax(90px,1fr)_minmax(80px,0.8fr)_140px]
                             gap-3 px-5 py-2 border-b border-terminal-border/50
                             text-[10px] text-terminal-muted uppercase tracking-widest font-bold">
@@ -459,7 +392,6 @@ export default function App() {
               <span className="text-right">Action</span>
             </div>
 
-            {/* Lignes de tokens */}
             <div className="divide-y divide-terminal-border/20">
               {opportunities.length === 0 ? (
                 <EmptyState isConnected={isConnected} />
@@ -480,15 +412,13 @@ export default function App() {
               )}
             </div>
 
-            {/* Pied du panel */}
             <div className="px-5 py-2 border-t border-terminal-border/50 text-[10px] text-terminal-muted flex justify-between">
               <span>Showing {filteredOpps.length}/{opportunities.length} opportunities</span>
-              <span>Refresh every 3s</span>
+              <span>Refresh every 10s</span>
             </div>
           </div>
         </section>
 
-        {/* Panel droit : Logs (33%) */}
         <aside className="w-full xl:w-[400px] flex-shrink-0">
           <LogPanel logs={logs} onClearLogs={clearLogs} />
         </aside>
@@ -497,7 +427,6 @@ export default function App() {
   )
 }
 
-// ── Composant état vide ─────────────────────────────────────────
 function EmptyState({ isConnected }: { isConnected: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-terminal-muted">
@@ -514,9 +443,9 @@ function EmptyState({ isConnected }: { isConnected: boolean }) {
       ) : (
         <>
           <div className="text-4xl mb-4 text-terminal-red">⚠</div>
-          <p className="text-sm text-terminal-red">Backend offline</p>
+          <p className="text-sm text-terminal-red">Connecting to DexScreener...</p>
           <p className="text-xs mt-2 text-terminal-muted">
-            Start the Rust backend: <code className="text-terminal-green">cargo run</code> in /backend
+            Waiting for API response
           </p>
         </>
       )}

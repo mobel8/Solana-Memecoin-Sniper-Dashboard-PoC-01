@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import {
   ArrowLeft, Zap, ExternalLink, TrendingUp, TrendingDown,
   Copy, Check, CheckCircle, RefreshCw, Activity, Shield,
@@ -8,7 +8,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import { Opportunity } from '../App'
+import type { Opportunity } from '../lib/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Génère des données de prix simulées (déterministe via seed)
@@ -103,6 +103,7 @@ function RefreshIcon() {
 // ─────────────────────────────────────────────────────────────────────────────
 interface TokenDetailProps {
   tokenAddress: string
+  opportunities: Opportunity[]
   onBack: () => void
   onSnipe: (tokenAddress: string) => void
   isSniping: boolean
@@ -112,36 +113,16 @@ interface TokenDetailProps {
 //  COMPOSANT PRINCIPAL
 // ─────────────────────────────────────────────────────────────────────────────
 export default function TokenDetail({
-  tokenAddress, onBack, onSnipe, isSniping,
+  tokenAddress, opportunities, onBack, onSnipe, isSniping,
 }: TokenDetailProps) {
-  const [opp, setOpp] = useState<Opportunity | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [lastUpdate, setLastUpdate] = useState<string>('')
+  const opp = useMemo(
+    () => opportunities.find(o => o.token_address === tokenAddress) ?? null,
+    [opportunities, tokenAddress],
+  )
+  const loading = false
+  const lastUpdate = useMemo(() => new Date().toLocaleTimeString('fr-FR', { hour12: false }), [opp?.id])
   const [copiedToken, setCopiedToken] = useState(false)
   const [copiedPair,  setCopiedPair]  = useState(false)
-
-  // Fetch du token depuis l'API
-  const fetchToken = useCallback(async () => {
-    try {
-      const res = await fetch('/api/opportunities')
-      if (res.ok) {
-        const data: Opportunity[] = await res.json()
-        const found = data.find(o => o.token_address === tokenAddress)
-        if (found) {
-          setOpp(found)
-          setLastUpdate(new Date().toLocaleTimeString('fr-FR', { hour12: false }))
-        }
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [tokenAddress])
-
-  useEffect(() => {
-    fetchToken()
-    const id = setInterval(fetchToken, 5000)
-    return () => clearInterval(id)
-  }, [fetchToken])
 
   // Scroll en haut à l'ouverture
   useEffect(() => {

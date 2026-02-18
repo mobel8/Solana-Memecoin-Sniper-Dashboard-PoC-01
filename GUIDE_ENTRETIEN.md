@@ -15,8 +15,13 @@
 8. [Priority Fees & Compute Units](#8-priority-fees--compute-units)
 9. [Concepts Rust utilisés](#9-concepts-rust-utilisés)
 10. [Concepts React/TypeScript utilisés](#10-concepts-reacttypescript-utilisés)
-11. [Questions d'entretien probables + réponses](#11-questions-dentretien-probables--réponses)
-12. [Comment parler du projet en entretien](#12-comment-parler-du-projet-en-entretien)
+11. [Solana vs Ethereum — les différences clés](#11-solana-vs-ethereum--les-différences-clés)
+12. [Questions d'entretien probables + réponses](#12-questions-dentretien-probables--réponses)
+13. [Pièges à éviter en entretien](#13-pièges-à-éviter-en-entretien)
+14. [Roadmap production — ce que tu ferais ensuite](#14-roadmap-production--ce-que-tu-ferais-ensuite)
+15. [Sécurité en production](#15-sécurité-en-production)
+16. [Comment parler du projet en entretien](#16-comment-parler-du-projet-en-entretien)
+17. [Questions à poser à l'interviewer](#17-questions-à-poser-à-linterviewer)
 
 ---
 
@@ -670,7 +675,64 @@ bg-terminal-green/20 → rgb(0 255 136 / 0.2)
 
 ---
 
-## 11. Questions d'entretien probables + réponses
+## 11. Solana vs Ethereum — les différences clés
+
+> **Question quasi-garantie en entretien.** Tu dois savoir expliquer pourquoi Solana et pas Ethereum.
+
+### Tableau comparatif
+
+| Critère | Solana | Ethereum |
+|---------|--------|----------|
+| **Consensus** | Proof of History + Tower BFT | Proof of Stake (Casper FFG) |
+| **TPS réel** | ~2 000–5 000 | ~15–30 (L1) |
+| **Temps de block** | ~400ms (slots) | ~12 secondes |
+| **Coût par tx** | ~$0.00025 | ~$1–50 (variable) |
+| **Langage smart contract** | Rust (compilé en BPF/SBF) | Solidity (compilé en EVM bytecode) |
+| **Modèle d'état** | Account Model (comme une base de données) | Account Model aussi, mais avec storage tries |
+| **Parallélisme** | Oui — Sealevel (exécution parallèle de txs) | Non — exécution séquentielle |
+| **MEV** | Jito (bundles + tips) | Flashbots (MEV-Boost + PBS) |
+| **Token standard** | SPL Token | ERC-20 |
+| **Framework** | Anchor | Hardhat / Foundry |
+| **Finalité** | ~400ms (optimiste), ~12s (confirmé) | ~12min (2 epochs) |
+
+### Proof of History (PoH) — expliqué simplement
+
+C'est l'innovation majeure de Solana. Au lieu de demander à tous les validateurs de se mettre d'accord sur l'heure (consensus coûteux), Solana utilise une **horloge cryptographique** :
+
+```
+hash_0 = SHA256("genesis")
+hash_1 = SHA256(hash_0)          ← 1 tick
+hash_2 = SHA256(hash_1)          ← 2 ticks
+...
+hash_N = SHA256(hash_N-1)        ← N ticks (~400ms = 1 slot)
+```
+
+Chaque hash prouve que du temps a passé. Pas besoin de synchroniser les horloges — **l'ordre des événements est prouvé cryptographiquement**. C'est pour ça que Solana est si rapide.
+
+### Sealevel — exécution parallèle
+
+Solana peut exécuter plusieurs transactions **en parallèle** si elles ne touchent pas les mêmes comptes :
+
+```
+Tx A : écrit sur Compte 1, lit Compte 2  ┐
+                                           ├── En parallèle (comptes différents)
+Tx B : écrit sur Compte 3, lit Compte 4  ┘
+
+Tx C : écrit sur Compte 1                 ← Séquentiel (même Compte 1 que Tx A)
+```
+
+C'est un avantage massif par rapport à Ethereum qui exécute tout séquentiellement.
+
+### Pourquoi Solana pour le trading/sniping ?
+
+1. **Latence** : 400ms de block time vs 12s → on réagit 30x plus vite
+2. **Coût** : $0.00025 par tx → on peut spam des transactions sans se ruiner
+3. **Parallélisme** : Plusieurs bundles/swaps exécutés en même temps
+4. **Jito** : Infrastructure MEV plus mature et accessible que Flashbots
+
+---
+
+## 12. Questions d'entretien probables + réponses
 
 ### Q1 : "Peux-tu nous expliquer l'architecture de ton projet ?"
 
@@ -722,9 +784,156 @@ bg-terminal-green/20 → rgb(0 255 136 / 0.2)
 **Réponse :**
 > "Premièrement, je transformerais la simulation en vrai moteur de transactions : intégration du SDK Solana pour construire les VersionedTransactions, intégration du SDK Jito pour la soumission réelle de bundles, et Jupiter pour le routing de swaps. Deuxièmement, j'ajouterais la persistance avec PostgreSQL pour l'historique et l'analytics. Troisièmement, je renforcerais la sécurité : gestion sécurisée des keypairs, rate limiting, et audit des transactions. Je suis motivé pour apprendre rapidement ce qui me manque et je suis autonome dans ma montée en compétences."
 
+### Q11 : "Quelle est la différence entre Solana et Ethereum ?"
+
+**Réponse :**
+> "La différence fondamentale c'est la performance : Solana produit un block toutes les 400ms avec ~3000 TPS réel, contre 12 secondes et ~15 TPS pour Ethereum L1. Solana y arrive grâce à deux innovations : Proof of History — une horloge cryptographique qui prouve l'ordre des événements sans consensus coûteux — et Sealevel — un moteur d'exécution parallèle qui traite les transactions simultanément si elles ne touchent pas les mêmes comptes. Pour le trading, c'est déterminant : 400ms de latence au lieu de 12 secondes, et des frais à $0.00025 au lieu de plusieurs dollars. C'est pour ça que l'infrastructure MEV comme Jito s'est développée sur Solana — les conditions sont idéales pour du trading haute fréquence."
+
+### Q12 : "Comment gérerais-tu les erreurs réseau et la résilience en production ?"
+
+**Réponse :**
+> "Plusieurs couches. D'abord, un système de retry avec backoff exponentiel pour les appels API (DexScreener, RPC Solana). Ensuite, un circuit breaker : si un endpoint échoue X fois de suite, on arrête de l'appeler pendant un cooldown au lieu de spammer. Pour les RPC Solana, j'utiliserais un pool de endpoints avec failover automatique — si le RPC principal ne répond plus, on bascule sur un backup. Côté transactions, Jito renvoie un statut de bundle (landed, failed, dropped) — on peut resubmit un bundle raté avec un tip plus élevé. Et surtout, du structured logging avec des niveaux de sévérité pour monitorer tout ça en temps réel."
+
+### Q13 : "Explique la différence entre Tokio spawn et std::thread::spawn"
+
+**Réponse :**
+> "std::thread::spawn crée un vrai thread OS — c'est lourd (quelques Mo de stack par thread) et le context switch est coûteux. tokio::spawn crée une 'green thread' ou tâche légère gérée par le runtime Tokio — on peut en avoir des milliers sur quelques threads OS. La différence clé : une tâche Tokio utilise le modèle coopératif — elle 'yield' à chaque .await, ce qui permet au runtime de scheduler d'autres tâches sur le même thread. C'est idéal pour de l'I/O bound (requêtes HTTP, RPC calls). Par contre, pour du CPU-bound (calculs lourds), il faut utiliser tokio::task::spawn_blocking pour ne pas bloquer le runtime async."
+
+### Q14 : "Comment tu scale ce système pour 1000 utilisateurs simultanés ?"
+
+**Réponse :**
+> "Plusieurs axes. D'abord, remplacer le polling HTTP par des WebSocket (tokio-tungstenite) — au lieu de 1000 clients qui font chacun 1 requête/3s (333 req/s), le serveur push les updates une seule fois. Ensuite, ajouter un cache Redis pour les données DexScreener et les quotes Jupiter — éviter de refetch ce qui n'a pas changé. Pour l'état, migrer de Arc<RwLock<Vec>> vers une base de données (PostgreSQL avec sqlx en async). Enfin, un load balancer (nginx/HAProxy) devant plusieurs instances du backend Rust, avec un message broker (Redis pub/sub ou NATS) pour synchroniser les watchers. Actix-web scale déjà très bien verticalement grâce à Tokio, donc on peut aller loin avant d'avoir besoin de scale horizontalement."
+
+### Q15 : "Tu as déjà travaillé avec des tests en Rust ? Comment tu testerais ce projet ?"
+
+**Réponse :**
+> "Rust a un système de tests intégré au langage, c'est un de ses points forts. Pour ce projet, j'organiserais les tests en 3 niveaux. Les tests unitaires dans chaque module avec #[cfg(test)] — par exemple tester la fonction de calcul du risk score avec différents inputs, ou le parsing des réponses DexScreener. Les tests d'intégration dans un dossier tests/ — tester les endpoints Actix-web avec actix-web::test qui simule des requêtes HTTP sans lancer un vrai serveur. Et des tests de bout en bout avec un backend de test qui utilise des fixtures JSON au lieu d'appeler les vraies APIs. Le mock est facilité par les traits en Rust — on peut créer un trait DataFetcher implémenté par un RealFetcher et un MockFetcher."
+
 ---
 
-## 12. Comment parler du projet en entretien
+## 13. Pièges à éviter en entretien
+
+### Ce qu'il ne faut PAS faire
+
+1. **Dire "c'est un PoC, c'est pas fini"** comme excuse
+   - Dis plutôt : "C'est un PoC qui démontre mes compétences, et voici ma roadmap pour la production"
+
+2. **Confondre simulation et production**
+   - Sois honnête : "Les transactions sont simulées, mais je comprends exactement ce qu'il faudrait pour les rendre réelles" — puis explique concrètement
+
+3. **Répondre "je sais pas" sans rebondir**
+   - Dis plutôt : "Je n'ai pas encore implémenté ça, mais voici comment je m'y prendrais..."
+
+4. **Survendre tes compétences Rust**
+   - Si tu débutes en Rust, assume-le : "J'apprends Rust en construisant ce projet. Je maîtrise les concepts fondamentaux (ownership, borrowing, async) et je monte en compétence chaque jour"
+
+5. **Oublier le contexte business**
+   - Ne parle pas que de la technique. Montre que tu comprends POURQUOI on fait ça : "Ce type d'infra permet aux clients pro de 01 Studio d'exécuter des stratégies de trading avec un avantage de latence"
+
+6. **Réciter des définitions par cœur**
+   - Si on te demande "c'est quoi un RwLock", ne récite pas la doc. Dis : "Dans mon projet, je l'utilise pour [cas concret]"
+
+### Red flags que l'interviewer teste
+
+- **Tu comprends vraiment ou tu as juste copié ?** → Prépare des explications avec tes propres mots
+- **Tu sais quand NE PAS utiliser une technologie ?** → "Jito n'est utile que si on a besoin de priorité d'exécution, sinon les priority fees suffisent"
+- **Tu as de l'esprit critique ?** → "DexScreener est limité pour le sniping sérieux car il y a ~10s de délai. En prod on brancherait directement sur les events on-chain via un RPC WebSocket Solana"
+
+---
+
+## 14. Roadmap production — ce que tu ferais ensuite
+
+> **Montre que tu as une vision.** Un interviewer veut voir que tu penses au-delà du PoC.
+
+### Phase 1 — Transactions réelles (2-3 semaines)
+
+```
+PoC actuel                          Production
+─────────                           ──────────
+Simulation console.log()    →       SDK Solana (solana-sdk) pour construire des VersionedTransaction
+Jito config UI only         →       jito-sdk-rust pour soumettre de vrais bundles
+Jupiter quote affichée      →       Jupiter API v6 pour obtenir les instructions de swap
+Pas de wallet               →       Keypair management sécurisé (fichier chiffré ou HSM)
+```
+
+### Phase 2 — Persistance & Monitoring (2 semaines)
+
+- **PostgreSQL** (via sqlx async) : historique des trades, P&L, analytics
+- **Redis** : cache des quotes, rate limiting, session management
+- **Prometheus + Grafana** : métriques temps réel (latence bundle, taux d'inclusion, P&L)
+- **Structured logging** (tracing crate) : logs structurés avec spans pour le debugging
+
+### Phase 3 — Event-driven architecture (2-3 semaines)
+
+```
+Polling DexScreener /10s    →       WebSocket RPC Solana (programSubscribe)
+                                    ↓
+                                    Détection instantanée des nouvelles pools
+                                    ↓
+                                    Réaction en <1 seconde au lieu de 10s
+```
+
+- Remplacer le polling par un listener on-chain via `accountSubscribe` / `programSubscribe`
+- Détecter les nouvelles liquidity pools directement depuis les events Raydium/Orca
+- Push WebSocket vers le frontend au lieu du polling 3s
+
+### Phase 4 — Sécurité & Scale (continu)
+
+- Multi-wallet management
+- Rate limiting intelligent par endpoint
+- Horizontal scaling avec Redis pub/sub
+- Tests d'intégration end-to-end avec Solana test validator
+
+---
+
+## 15. Sécurité en production
+
+> **Question fréquente.** Montre que tu penses sécurité dès la conception.
+
+### Gestion des clés privées
+
+```
+❌ Clé privée en clair dans le code ou .env
+❌ Clé privée commitée dans git
+
+✅ Fichier keypair chiffré avec mot de passe (argon2)
+✅ Variables d'environnement + secrets manager (Vault, AWS KMS)
+✅ En production sérieuse : HSM (Hardware Security Module)
+```
+
+### Validation des transactions
+
+Avant de signer une transaction, TOUJOURS vérifier :
+1. **Le programme appelé** — est-ce bien le vrai programme Raydium/Jupiter ? (comparer l'adresse)
+2. **Le montant** — ne jamais signer une tx qui envoie plus que ce qu'on veut
+3. **Le slippage** — toujours inclure un slippage max pour éviter les manipulations
+4. **Les comptes** — vérifier que les comptes dans la tx correspondent à ce qu'on attend
+
+### Protection contre les attaques courantes
+
+| Attaque | Protection |
+|---------|------------|
+| **Sandwich** | Jito Bundles (atomicité) |
+| **Front-running** | Tips Jito élevés + latence minimale |
+| **Honeypot** | Risk scoring + vérification mint/freeze authority |
+| **Rug pull** | Vérifier si la liquidité est lockée (LP tokens burned) |
+| **Fake token** | Vérifier l'adresse du mint, pas juste le nom/symbole |
+| **RPC manipulation** | Utiliser plusieurs RPC et comparer les résultats |
+
+### Rate limiting & abus
+
+```rust
+// Exemple conceptuel avec actix-web
+// - Max 10 snipes par minute par IP
+// - Max 100 requêtes API par minute
+// - Cooldown de 5s entre deux snipes sur le même token
+```
+
+En production, utiliser un middleware actix-web + Redis pour le rate limiting distribué.
+
+---
+
+## 16. Comment parler du projet en entretien
 
 ### Le pitch (30 secondes)
 
@@ -751,29 +960,71 @@ bg-terminal-green/20 → rgb(0 255 136 / 0.2)
 
 ---
 
+## 17. Questions à poser à l'interviewer
+
+> **Poser des questions montre ta motivation et ton intelligence.** Prépare 3-4 questions et pose-en 2-3 en fin d'entretien.
+
+### Sur le produit
+
+- "Quels sont les principaux clients cibles de l'infrastructure ? Des market makers, des fonds, des traders particuliers ?"
+- "Le produit actuel est-il déjà en production avec de vraies transactions, ou on part d'un PoC ?"
+- "Quel est le volume de transactions quotidien que vous visez ?"
+
+### Sur la stack technique
+
+- "Vous utilisez Anchor pour les programmes on-chain ou du Solana natif ?"
+- "Comment gérez-vous les clés privées en production ? HSM, secrets manager ?"
+- "Vous avez un noeud Solana RPC dédié ou vous passez par un provider (Helius, QuickNode) ?"
+- "Quelle est votre stratégie de tests ? Tests unitaires, intégration, test validator local ?"
+
+### Sur l'équipe et le poste
+
+- "Comment est organisée l'équipe tech ? Combien de devs Rust ?"
+- "C'est quoi un sprint typique chez vous ? Quel est le cycle de release ?"
+- "Quels sont les plus gros défis techniques que vous affrontez en ce moment ?"
+
+### Sur l'évolution
+
+- "Y a-t-il de l'espace pour contribuer à des programmes on-chain (smart contracts) ?"
+- "Comment vous voyez l'évolution du produit sur les 6 prochains mois ?"
+
+---
+
 ## Glossaire rapide
 
 | Terme | Définition simple |
 |-------|-------------------|
 | **AMM** | Automated Market Maker — algorithme qui fixe le prix automatiquement sur un DEX |
+| **ATA** | Associated Token Account — compte qui lie un wallet à un type de token SPL |
 | **Block Engine** | Serveur Jito qui reçoit les bundles et les transmet aux validateurs |
-| **BPF** | Berkeley Packet Filter — format de compilation des programmes Solana |
+| **BPF/SBF** | Berkeley Packet Filter / Solana Bytecode Format — format de compilation des programmes Solana |
 | **Bundle** | Groupe de transactions atomique soumis via Jito |
+| **Circuit Breaker** | Pattern qui coupe les appels vers un service défaillant après N erreurs |
 | **CPI** | Cross-Program Invocation — un programme qui appelle un autre programme |
 | **CU** | Compute Unit — unité de mesure du coût de calcul d'une instruction |
 | **DEX** | Decentralized Exchange — plateforme d'échange sans intermédiaire |
+| **Epoch** | Groupe de ~432 000 slots (~2-3 jours) — sert pour le staking et la rotation des leaders |
 | **FDV** | Fully Diluted Valuation — capitalisation si tous les tokens étaient en circulation |
+| **Freeze Authority** | Adresse autorisée à geler les transferts d'un token (red flag si active) |
 | **Honeypot** | Token arnaque impossible à revendre |
+| **HSM** | Hardware Security Module — dispositif physique pour stocker les clés privées |
 | **IDL** | Interface Definition Language — description des instructions d'un programme Anchor |
 | **Lamport** | Plus petite unité de SOL (1 SOL = 10^9 lamports) |
+| **LP Token** | Liquidity Provider Token — preuve de dépôt de liquidité dans une pool |
 | **MEV** | Maximal Extractable Value — profit extractible par le réordonnancement de transactions |
 | **Mint** | L'adresse d'un type de token SPL (équivalent de l'adresse du contrat ERC-20) |
+| **Mint Authority** | Adresse autorisée à créer de nouveaux tokens (red flag si active = supply illimitée) |
+| **PDA** | Program Derived Address — adresse déterministe sans clé privée, contrôlée par un programme |
+| **PoH** | Proof of History — horloge cryptographique de Solana qui prouve l'ordre des événements |
 | **Priority Fee** | Frais additionnels pour être priorisé dans un block |
+| **RPC** | Remote Procedure Call — API pour interagir avec un noeud Solana |
 | **Rug Pull** | Arnaque où le créateur retire toute la liquidité |
 | **Sandwich** | Attaque : acheter avant + vendre après une grosse transaction |
+| **Sealevel** | Moteur d'exécution parallèle de transactions Solana |
 | **Slippage** | Différence entre prix attendu et prix d'exécution |
 | **Slot** | Intervalle de temps (~400ms) pendant lequel un validateur produit un block |
 | **SPL Token** | Standard de tokens sur Solana (équivalent ERC-20 sur Ethereum) |
 | **Tip** | Pourboire SOL payé au validateur Jito pour garantir l'inclusion |
+| **Tower BFT** | Algorithme de consensus de Solana basé sur PoH |
 | **TPS** | Transactions Per Second — débit du réseau |
 | **Versioned Transaction** | Format de transaction Solana supportant les "address lookup tables" |

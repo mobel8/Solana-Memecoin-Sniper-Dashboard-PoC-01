@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react'
+import { useRef } from 'react'
 import { Terminal, Trash2 } from 'lucide-react'
 import { LogEntry } from '../App'
 
@@ -33,24 +33,6 @@ const LEVEL_BG: Record<LogEntry['level'], string> = {
 
 export default function LogPanel({ logs, onClearLogs }: LogPanelProps) {
   const scrollRef  = useRef<HTMLDivElement>(null)
-  const bottomRef  = useRef<HTMLDivElement>(null)
-  const isLockedRef = useRef(true) // Auto-scroll activé par défaut
-
-  // Auto-scroll vers le bas quand de nouveaux logs arrivent
-  // SEULEMENT si l'utilisateur n'a pas scrollé manuellement vers le haut
-  useEffect(() => {
-    if (isLockedRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [logs.length])
-
-  // Détecter si l'utilisateur scrolle manuellement
-  const handleScroll = () => {
-    const el = scrollRef.current
-    if (!el) return
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
-    isLockedRef.current = isAtBottom
-  }
 
   const errorCount   = logs.filter(l => l.level === 'ERROR').length
   const successCount = logs.filter(l => l.level === 'SUCCESS').length
@@ -95,7 +77,6 @@ export default function LogPanel({ logs, onClearLogs }: LogPanelProps) {
       {/* ── Zone des logs (scrollable) ───────────────────────────── */}
       <div
         ref={scrollRef}
-        onScroll={handleScroll}
         className="flex-1 overflow-y-auto px-3 py-2 space-y-px text-xs"
       >
         {logs.length === 0 ? (
@@ -107,7 +88,6 @@ export default function LogPanel({ logs, onClearLogs }: LogPanelProps) {
             <LogLine key={log.id} log={log} />
           ))
         )}
-        <div ref={bottomRef} />
       </div>
 
       {/* ── Pied de panel — ligne de prompt ─────────────────────── */}
