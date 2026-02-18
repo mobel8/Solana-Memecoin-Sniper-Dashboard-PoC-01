@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   Zap, ExternalLink, TrendingUp, TrendingDown,
-  CheckCircle, Copy, Check, ChevronDown,
+  CheckCircle, Copy, Check, ChevronDown, Maximize2, Shield,
 } from 'lucide-react'
 import {
   AreaChart, Area, LineChart, Line,
@@ -13,6 +13,7 @@ interface TokenRowProps {
   opportunity: Opportunity
   onSnipe: (tokenAddress: string) => void
   isSniping: boolean
+  onViewDetail: (tokenAddress: string) => void
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,16 +117,16 @@ function ExpandedPanel({
     [opp.id], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  const totalH1  = opp.txns_h1_buys  + opp.txns_h1_sells
-  const totalH24 = opp.txns_h24_buys + opp.txns_h24_sells
-  const buyRatioH1  = totalH1  > 0 ? opp.txns_h1_buys  / totalH1  : 0.5
-  const buyRatioH24 = totalH24 > 0 ? opp.txns_h24_buys / totalH24 : 0.5
+  const totalH1  = (opp.txns_h1_buys ?? 0)  + (opp.txns_h1_sells ?? 0)
+  const totalH24 = (opp.txns_h24_buys ?? 0) + (opp.txns_h24_sells ?? 0)
+  const buyRatioH1  = totalH1  > 0 ? (opp.txns_h1_buys ?? 0)  / totalH1  : 0.5
+  const buyRatioH24 = totalH24 > 0 ? (opp.txns_h24_buys ?? 0) / totalH24 : 0.5
 
   const timeframes = [
-    { label: '5m',  value: opp.price_change_m5  },
-    { label: '1h',  value: opp.price_change_h1  },
-    { label: '6h',  value: opp.price_change_h6  },
-    { label: '24h', value: opp.price_change_h24 },
+    { label: '5m',  value: opp.price_change_m5  ?? 0 },
+    { label: '1h',  value: opp.price_change_h1  ?? 0 },
+    { label: '6h',  value: opp.price_change_h6  ?? 0 },
+    { label: '24h', value: opp.price_change_h24 ?? 0 },
   ]
 
   const marketInfo = [
@@ -179,8 +180,8 @@ function ExpandedPanel({
         </ResponsiveContainer>
       </div>
 
-      {/* ── Grille d'infos en 3 colonnes ──────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+      {/* ── Grille d'infos en 3 colonnes + risk ──────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
 
         {/* ─ Variations multi-timeframe ─────────────────────────── */}
         <div>
@@ -279,6 +280,50 @@ function ExpandedPanel({
             ))}
           </div>
         </div>
+
+        {/* ─ Risk Analysis ────────────────────────────────────── */}
+        {opp.risk_score && (
+          <div>
+            <div className="text-[10px] text-terminal-muted uppercase tracking-widest mb-2 flex items-center gap-1.5">
+              <span className="w-1 h-3 rounded-full bg-terminal-red/60 inline-block" />
+              Risk Analysis
+            </div>
+            <div className="mb-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-terminal-muted">Score</span>
+                <span className={`font-bold tabular-nums ${
+                  opp.risk_score.score >= 80 ? 'text-terminal-green' :
+                  opp.risk_score.score >= 60 ? 'text-terminal-yellow' :
+                  'text-terminal-red'
+                }`}>
+                  {opp.risk_score.score}/100
+                </span>
+              </div>
+              <div className="h-1.5 rounded-full bg-terminal-border/30 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    opp.risk_score.score >= 80 ? 'bg-terminal-green/70' :
+                    opp.risk_score.score >= 60 ? 'bg-terminal-yellow/70' :
+                    'bg-terminal-red/70'
+                  }`}
+                  style={{ width: `${opp.risk_score.score}%` }}
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              {opp.risk_score.flags.map((flag, i) => (
+                <div key={i} className="flex items-start gap-1.5 text-[10px]">
+                  <span className={`flex-shrink-0 mt-0.5 ${
+                    flag.passed ? 'text-terminal-green' : 'text-terminal-red'
+                  }`}>
+                    {flag.passed ? '✓' : '✗'}
+                  </span>
+                  <span className="text-terminal-muted/80">{flag.description}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -287,7 +332,7 @@ function ExpandedPanel({
 // ─────────────────────────────────────────────────────────────────────────────
 //  COMPOSANT TokenRow
 // ─────────────────────────────────────────────────────────────────────────────
-export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowProps) {
+export default function TokenRow({ opportunity, onSnipe, isSniping, onViewDetail }: TokenRowProps) {
   const {
     token_name, token_symbol, token_address, pair_address,
     price_usd, liquidity_usd, volume_h1, price_change_h1,
@@ -305,7 +350,7 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
   }
 
   const isSniped   = status === 'SNIPED'
-  const isPositive = price_change_h1 >= 0
+  const isPositive = (price_change_h1 ?? 0) >= 0
   const canSnipe   = !isSniped && !isSniping
 
   // CSS variables pour que le graphe suive la couleur accent du thème
@@ -349,6 +394,9 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
               <span className="text-[9px] bg-terminal-green/20 text-terminal-green border border-terminal-green/30 px-1 rounded flex-shrink-0">
                 SNIPED
               </span>
+            )}
+            {opportunity.risk_score && (
+              <RiskBadge score={opportunity.risk_score.score} level={opportunity.risk_score.level} />
             )}
           </div>
           <span className="text-xs text-terminal-muted truncate pl-3">{token_name}</span>
@@ -414,7 +462,7 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
             : <TrendingDown className="w-3.5 h-3.5 text-terminal-red   flex-shrink-0" />
           }
           <span className={`text-sm font-bold tabular-nums ${isPositive ? 'text-terminal-green' : 'text-terminal-red'}`}>
-            {isPositive ? '+' : ''}{price_change_h1.toFixed(2)}%
+            {isPositive ? '+' : ''}{(price_change_h1 ?? 0).toFixed(2)}%
           </span>
         </div>
 
@@ -467,6 +515,15 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
               }
             </button>
 
+            {/* Ouvrir page détail */}
+            <button
+              onClick={() => onViewDetail(token_address)}
+              title={`Voir détails ${token_symbol}`}
+              className="text-terminal-muted/50 hover:text-terminal-green transition-colors"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
+
             {/* DexScreener */}
             <a
               href={`https://dexscreener.com/solana/${pair_address}`}
@@ -491,6 +548,24 @@ export default function TokenRow({ opportunity, onSnipe, isSniping }: TokenRowPr
         />
       )}
     </div>
+  )
+}
+
+// ── Badge de risque ──────────────────────────────────────────────
+function RiskBadge({ score, level }: { score: number; level: string }) {
+  const colors = {
+    SAFE:     'bg-terminal-green/15 text-terminal-green border-terminal-green/30',
+    CAUTION:  'bg-terminal-yellow/15 text-terminal-yellow border-terminal-yellow/30',
+    DANGER:   'bg-terminal-red/15 text-terminal-red border-terminal-red/30',
+    CRITICAL: 'bg-terminal-red/25 text-terminal-red border-terminal-red/50',
+  }[level] || 'bg-terminal-muted/15 text-terminal-muted border-terminal-border'
+
+  return (
+    <span className={`text-[8px] px-1 py-0 rounded border flex-shrink-0 flex items-center gap-0.5 tabular-nums ${colors}`}
+          title={`Risk: ${level} (${score}/100)`}>
+      <Shield className="w-2 h-2" />
+      {score}
+    </span>
   )
 }
 

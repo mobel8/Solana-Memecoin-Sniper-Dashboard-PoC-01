@@ -10,25 +10,36 @@
 //   └─────────────────────┘       └─────────────┬────────────────────┘
 //                                               │ Arc::clone (pointeur partagé)
 //                                               ▼
-//                                 ┌─────────────────────────┐
-//                                 │  AppState               │
-//                                 │  Arc<Mutex<Vec<Opp>>>   │◀── ÉTAT PARTAGÉ
-//                                 │  Arc<Mutex<Vec<Log>>>   │    (thread-safe)
-//                                 └────────────┬────────────┘
+//                                 ┌─────────────────────────────────────┐
+//                                 │  AppState                          │
+//                                 │  Arc<RwLock<Vec<Opp>>>             │
+//                                 │  Arc<Mutex<Vec<Log>>>              │
+//                                 │  Arc<RwLock<JitoConfig>>           │◀── ÉTAT
+//                                 │  Arc<RwLock<NetworkStats>>         │    PARTAGÉ
+//                                 │  Arc<Mutex<Vec<SnipeHistory>>>     │
+//                                 └────────────┬───────────────────────┘
 //                                              │ web::Data (injection)
 //                                              ▼
-//   ┌────────────────────┐       ┌─────────────────────────────┐
-//   │  React Frontend    │──────▶│  Actix-web HTTP Handlers    │
-//   │  (port 3000)       │◀──────│  GET  /api/opportunities    │
-//   └────────────────────┘  JSON │  GET  /api/logs             │
-//                                │  POST /api/snipe/:address   │
-//                                └─────────────────────────────┘
+//   ┌────────────────────┐       ┌──────────────────────────────────────┐
+//   │  React Frontend    │──────▶│  Actix-web HTTP Handlers             │
+//   │  (port 3000)       │◀──────│  GET  /api/opportunities             │
+//   └────────────────────┘  JSON │  GET  /api/logs                      │
+//                                │  POST /api/snipe/:address            │
+//                                │  GET  /api/network                   │
+//                                │  GET  /api/jito/config               │
+//                                │  PUT  /api/jito/config               │
+//                                │  POST /api/jupiter/quote             │
+//                                │  GET  /api/snipe/history             │
+//                                └──────────────────────────────────────┘
 //
 //  CONCEPTS RUST CLÉS DANS CE FICHIER :
 //  ┌─────────────┬────────────────────────────────────────────────────────┐
 //  │ Arc<T>      │ "Atomic Reference Counted". Pointeur partagé entre     │
 //  │             │ threads. Le compteur est atomique → pas de data race.  │
 //  │             │ Clone un Arc = incrémenter le compteur, pas copier T.  │
+//  ├─────────────┼────────────────────────────────────────────────────────┤
+//  │ RwLock<T>   │ Verrou lecteurs/écrivain. N lecteurs OU 1 écrivain.   │
+//  │             │ .read() = accès partagé, .write() = accès exclusif.   │
 //  ├─────────────┼────────────────────────────────────────────────────────┤
 //  │ Mutex<T>    │ Verrou exclusif. .lock() bloque jusqu'à acquisition.   │
 //  │             │ Le MutexGuard libère le verrou à la fin du scope (Drop) │
@@ -41,7 +52,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use actix_cors::Cors;
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, put, web, App, HttpResponse, HttpServer, Responder};
 use chrono::Utc;
 use log::{error, info, warn};
 use reqwest::Client;
@@ -107,6 +118,8 @@ pub struct Opportunity {
     /// Heure de détection par notre watcher (format HH:MM:SS)
     pub detected_at: String,
     pub status: OpportunityStatus,
+    /// Score de risque calculé pour ce token (honeypot, rug pull, etc.)
+    pub risk_score: Option<RiskScore>,
 }
 
 /// Niveau de sévérité d'une entrée de log.
@@ -126,6 +139,197 @@ pub struct LogEntry {
     pub timestamp: String,
     pub level: LogLevel,
     pub message: String,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SECTION 1b — MODÈLES JITO BUNDLES & JUPITER (Infrastructure Solana)
+//
+//  Ces structures modélisent les composants clés de l'infrastructure
+//  de transactions Solana utilisée en production :
+//
+//  • Jito Bundles : Regroupement de transactions envoyées directement
+//    aux validateurs Jito (MEV-aware) avec un "tip" (pourboire) SOL
+//    pour garantir l'inclusion prioritaire dans un block.
+//
+//  • Jupiter : Agrégateur de liquidité DEX. Il calcule la meilleure
+//    route de swap parmi tous les DEX Solana (Raydium, Orca, etc.)
+//    pour obtenir le meilleur prix avec le moins de slippage.
+//
+//  • Priority Fees : Frais additionnels (en micro-lamports par CU)
+//    pour prioritiser sa transaction dans la file d'attente du leader.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Configuration du moteur de bundles Jito.
+///
+/// En production, ces paramètres contrôlent comment nos transactions
+/// sont soumises aux validateurs Jito pour une exécution prioritaire.
+/// Le tip est crucial : trop bas → le bundle est ignoré,
+/// trop haut → on perd de la marge sur le trade.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JitoConfig {
+    /// Tip minimum en SOL (ex: 0.0001 SOL ≈ $0.014)
+    pub tip_min_sol: f64,
+    /// Tip maximum en SOL (ex: 0.01 SOL ≈ $1.40)
+    pub tip_max_sol: f64,
+    /// Block Engine sélectionné (Amsterdam, Frankfurt, NY, Tokyo)
+    /// Chaque block engine a une latence différente selon notre localisation
+    pub block_engine: String,
+    /// Stratégie de tip : "fixed", "dynamic", "aggressive"
+    /// - fixed : toujours le même tip
+    /// - dynamic : ajusté selon la congestion réseau
+    /// - aggressive : tip maximum pour garantir l'inclusion
+    pub tip_strategy: String,
+    /// Nombre max de transactions par bundle (1-5 sur Jito)
+    pub max_txns_per_bundle: u8,
+    /// Slippage toléré en % (ex: 1.0 = 1%)
+    pub slippage_bps: u64,
+    /// Activer la protection anti-sandwich
+    /// (les bundles Jito sont atomiques → protection native contre le front-running)
+    pub anti_sandwich: bool,
+    /// Compute Unit limit pour la transaction
+    /// (chaque instruction Solana consomme des CU, max 1.4M par tx)
+    pub compute_unit_limit: u32,
+    /// Priority fee en micro-lamports par CU
+    /// (1 lamport = 0.000000001 SOL)
+    pub priority_fee_micro_lamports: u64,
+}
+
+impl Default for JitoConfig {
+    fn default() -> Self {
+        Self {
+            tip_min_sol: 0.0001,
+            tip_max_sol: 0.005,
+            block_engine: "amsterdam".to_string(),
+            tip_strategy: "dynamic".to_string(),
+            max_txns_per_bundle: 1,
+            slippage_bps: 100, // 1%
+            anti_sandwich: true,
+            compute_unit_limit: 200_000,
+            priority_fee_micro_lamports: 5_000,
+        }
+    }
+}
+
+/// Statistiques réseau Solana simulées.
+///
+/// En production, ces données viendraient de :
+/// - `getRecentPerformanceSamples()` (RPC Solana)
+/// - `getSlot()` pour le slot courant
+/// - `getRecentPrioritizationFees()` pour les frais de priorité
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NetworkStats {
+    /// Transactions par seconde (TPS) du réseau Solana
+    /// Solana peut théoriquement atteindre 65 000 TPS
+    pub tps: u64,
+    /// Slot courant (un slot ≈ 400ms sur Solana)
+    /// Le leader du slot produit un block contenant les transactions
+    pub current_slot: u64,
+    /// Epoch courante (1 epoch ≈ 2-3 jours, regroupe ~432 000 slots)
+    pub epoch: u64,
+    /// Prix estimé de la priority fee pour une inclusion "rapide"
+    /// (en micro-lamports par Compute Unit)
+    pub priority_fee_estimate: u64,
+    /// Niveau de congestion : "low", "medium", "high", "critical"
+    pub congestion_level: String,
+    /// Nombre de validateurs actifs
+    pub active_validators: u64,
+    /// Prix SOL/USD (pour affichage)
+    pub sol_price_usd: f64,
+    /// Timestamp de dernière mise à jour
+    pub last_updated: String,
+}
+
+impl Default for NetworkStats {
+    fn default() -> Self {
+        Self {
+            tps: 3200,
+            current_slot: 290_000_000,
+            epoch: 600,
+            priority_fee_estimate: 5_000,
+            congestion_level: "medium".to_string(),
+            active_validators: 1_900,
+            sol_price_usd: 140.0,
+            last_updated: Utc::now().format("%H:%M:%S").to_string(),
+        }
+    }
+}
+
+/// Résultat d'une simulation de quote Jupiter.
+///
+/// En production, on appellerait l'API Jupiter :
+/// `GET https://quote-api.jup.ag/v6/quote?inputMint=...&outputMint=...&amount=...`
+///
+/// Jupiter compare les prix sur tous les DEX Solana et retourne
+/// la meilleure route (parfois multi-hop : SOL → USDC → TOKEN).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JupiterQuote {
+    pub input_mint: String,
+    pub output_mint: String,
+    pub input_amount: u64,
+    pub output_amount: u64,
+    pub price_impact_pct: f64,
+    /// Route utilisée (ex: ["Raydium", "Orca"] pour un multi-hop)
+    pub route_plan: Vec<JupiterRoutePlan>,
+    /// Frais de swap en lamports
+    pub swap_fee_lamports: u64,
+    /// Slippage estimé en bps
+    pub slippage_bps: u64,
+    /// Temps estimé d'exécution en ms
+    pub estimated_time_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JupiterRoutePlan {
+    pub dex: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub fee_pct: f64,
+    pub liquidity: f64,
+}
+
+/// Entrée dans l'historique des snipes (simulés ou réels).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SnipeHistoryEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub token_symbol: String,
+    pub token_address: String,
+    pub action: String,        // "BUY" ou "SELL"
+    pub amount_sol: f64,
+    pub price_usd: f64,
+    pub tip_sol: f64,
+    pub bundle_id: String,
+    pub block_engine: String,
+    pub landing_slot: u64,
+    pub status: String,        // "LANDED", "DROPPED", "PENDING"
+    pub pnl_pct: f64,
+    pub simulation: bool,
+}
+
+/// Score de risque d'un token (détection honeypot / rug pull).
+///
+/// En production, ce scoring serait basé sur :
+/// - Analyse de la mint authority (peut-elle mint à l'infini ?)
+/// - Freeze authority (le créateur peut-il geler les comptes ?)
+/// - Concentration des holders (top 10 holders > 80% = red flag)
+/// - Liquidité lockée ou non
+/// - Ancienneté du deployer wallet
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RiskScore {
+    /// Score global 0-100 (0 = très risqué, 100 = sûr)
+    pub score: u8,
+    /// Niveau : "SAFE", "CAUTION", "DANGER", "CRITICAL"
+    pub level: String,
+    /// Flags détaillés
+    pub flags: Vec<RiskFlag>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RiskFlag {
+    pub name: String,
+    pub severity: String,  // "info", "warning", "danger"
+    pub description: String,
+    pub passed: bool,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -243,6 +447,12 @@ pub struct AppState {
     pub opportunities: Arc<RwLock<Vec<Opportunity>>>,
     pub logs: Arc<Mutex<Vec<LogEntry>>>,
     pub http_client: Client,
+    /// Configuration Jito Bundles (modifiable via PUT /api/jito/config)
+    pub jito_config: Arc<RwLock<JitoConfig>>,
+    /// Statistiques réseau Solana (mises à jour par le network_watcher)
+    pub network_stats: Arc<RwLock<NetworkStats>>,
+    /// Historique des snipes simulés
+    pub snipe_history: Arc<Mutex<Vec<SnipeHistoryEntry>>>,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -348,6 +558,33 @@ async fn simulate_snipe(
         cap_logs(&mut logs);
     }
 
+    // ── Étape 3 : Ajouter à l'historique ────────────────────────────────
+    {
+        let jito = data.jito_config.read().unwrap();
+        let net  = data.network_stats.read().unwrap();
+        let mut history = data.snipe_history.lock().unwrap();
+        history.push(SnipeHistoryEntry {
+            id:            Uuid::new_v4().to_string(),
+            timestamp:     Utc::now().format("%H:%M:%S%.3f").to_string(),
+            token_symbol:  token_address[..6].to_string(),
+            token_address: token_address.clone(),
+            action:        "BUY".to_string(),
+            amount_sol:    0.1,
+            price_usd:     0.0,
+            tip_sol:       jito.tip_min_sol,
+            bundle_id:     fake_sig.clone(),
+            block_engine:  jito.block_engine.clone(),
+            landing_slot:  net.current_slot + 2,
+            status:        "LANDED".to_string(),
+            pnl_pct:       0.0,
+            simulation:    true,
+        });
+        let hlen = history.len();
+        if hlen > 100 {
+            history.drain(0..hlen - 100);
+        }
+    }
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "simulation": true,
@@ -355,6 +592,157 @@ async fn simulate_snipe(
         "signature": fake_sig,
         "token": token_address
     }))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SECTION 4b — ENDPOINTS JITO BUNDLES
+//
+//  Ces endpoints exposent la configuration et le contrôle du moteur
+//  de bundles Jito. En production, PUT /api/jito/config permettrait
+//  de modifier les paramètres de soumission en temps réel sans
+//  redémarrer le serveur (hot-reload de la stratégie de trading).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/jito/config — Retourne la configuration Jito actuelle
+#[get("/api/jito/config")]
+async fn get_jito_config(data: web::Data<AppState>) -> impl Responder {
+    let config = data.jito_config.read().unwrap();
+    HttpResponse::Ok().json(config.clone())
+}
+
+/// PUT /api/jito/config — Met à jour la configuration Jito
+///
+/// Permet de modifier les paramètres du moteur de bundles en temps réel.
+/// En production, chaque modification serait validée (ex: tip_min < tip_max)
+/// et loggée pour audit.
+#[put("/api/jito/config")]
+async fn update_jito_config(
+    body: web::Json<JitoConfig>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let new_config = body.into_inner();
+    info!("⚙ Jito config updated: strategy={}, tip={}-{} SOL, engine={}",
+        new_config.tip_strategy, new_config.tip_min_sol, new_config.tip_max_sol,
+        new_config.block_engine);
+
+    {
+        let mut config = data.jito_config.write().unwrap();
+        *config = new_config.clone();
+    }
+
+    push_log(&data.logs, LogLevel::Info,
+        format!("⚙ Jito config updated → strategy={}, tip={}-{} SOL",
+            new_config.tip_strategy, new_config.tip_min_sol, new_config.tip_max_sol));
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "config": new_config
+    }))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SECTION 4c — ENDPOINT JUPITER SWAP QUOTE (Simulation)
+//
+//  Jupiter est l'agrégateur DEX #1 sur Solana. Il interroge tous les
+//  DEX (Raydium, Orca, Meteora, Phoenix, etc.) pour trouver la route
+//  de swap optimale. Il peut faire du "split routing" (diviser l'ordre
+//  sur plusieurs DEX) et du "multi-hop" (SOL → USDC → TOKEN).
+//
+//  En production : POST https://quote-api.jup.ag/v6/quote
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct JupiterQuoteRequest {
+    pub input_mint: String,
+    pub output_mint: String,
+    pub amount_lamports: u64,
+    pub slippage_bps: Option<u64>,
+}
+
+/// POST /api/jupiter/quote — Simule un quote Jupiter
+///
+/// Calcule une route de swap simulée avec prix, impact et frais estimés.
+/// En production, on appellerait l'API Jupiter et on recevrait la route
+/// exacte avec les instructions de transaction Solana à signer.
+#[post("/api/jupiter/quote")]
+async fn get_jupiter_quote(
+    body: web::Json<JupiterQuoteRequest>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let req = body.into_inner();
+    let slippage = req.slippage_bps.unwrap_or(100);
+
+    // Simulation : on cherche le token dans nos opportunités pour son prix
+    let price = {
+        let opps = data.opportunities.read().unwrap();
+        opps.iter()
+            .find(|o| o.token_address == req.output_mint)
+            .map(|o| o.price_usd)
+            .unwrap_or(0.00001)
+    };
+
+    // Simuler une route multi-DEX réaliste
+    let route_plan = vec![
+        JupiterRoutePlan {
+            dex: "Raydium".to_string(),
+            input_mint: "So11111111111111111111111111111111111111112".to_string(), // SOL mint
+            output_mint: req.output_mint.clone(),
+            fee_pct: 0.25,
+            liquidity: 50_000.0,
+        },
+    ];
+
+    // Calcul du output simulé (en fonction du prix et du montant)
+    let sol_price = data.network_stats.read().unwrap().sol_price_usd;
+    let input_sol = req.amount_lamports as f64 / 1_000_000_000.0;
+    let input_usd = input_sol * sol_price;
+    let output_tokens = if price > 0.0 { input_usd / price } else { 0.0 };
+    let price_impact = (input_usd / 50_000.0) * 100.0; // Impact basé sur la liquidité simulée
+
+    let quote = JupiterQuote {
+        input_mint: req.input_mint,
+        output_mint: req.output_mint,
+        input_amount: req.amount_lamports,
+        output_amount: (output_tokens * 1_000_000.0) as u64, // 6 décimales (SPL standard)
+        price_impact_pct: (price_impact * 100.0).round() / 100.0,
+        route_plan,
+        swap_fee_lamports: 5_000, // ~0.000005 SOL
+        slippage_bps: slippage,
+        estimated_time_ms: 400, // ~1 slot Solana
+    };
+
+    push_log(&data.logs, LogLevel::Info,
+        format!("🔄 Jupiter quote: {:.4} SOL → {:.0} tokens | impact {:.2}%",
+            input_sol, output_tokens, price_impact));
+
+    HttpResponse::Ok().json(quote)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SECTION 4d — ENDPOINT NETWORK STATS
+//
+//  En production, ces données viendraient des RPC Solana :
+//  - solana_client::rpc_client::RpcClient::get_recent_performance_samples()
+//  - getSlot(), getEpochInfo(), getRecentPrioritizationFees()
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/network — Retourne les stats réseau Solana
+#[get("/api/network")]
+async fn get_network_stats(data: web::Data<AppState>) -> impl Responder {
+    let stats = data.network_stats.read().unwrap();
+    HttpResponse::Ok().json(stats.clone())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SECTION 4e — ENDPOINT HISTORIQUE DES SNIPES
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/snipe/history — Historique des snipes simulés
+#[get("/api/snipe/history")]
+async fn get_snipe_history(data: web::Data<AppState>) -> impl Responder {
+    let history = data.snipe_history.lock().unwrap();
+    let recent: Vec<SnipeHistoryEntry> = history.iter().rev().take(50).cloned().collect();
+    HttpResponse::Ok().json(recent)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -461,6 +849,10 @@ async fn start_watcher(
                                 .iter()
                                 .map(|p| {
                                     seen_pairs.insert(p.pair_address.clone());
+
+                                    // Calculer le score de risque pour chaque token détecté
+                                    let risk = compute_risk_score(p);
+
                                     Opportunity {
                                         id: Uuid::new_v4().to_string(),
                                         token_name:    p.base_token.name.clone(),
@@ -527,6 +919,7 @@ async fn start_watcher(
                                             .format("%H:%M:%S")
                                             .to_string(),
                                         status: OpportunityStatus::Detected,
+                                        risk_score: Some(risk),
                                     }
                                 })
                                 .collect();
@@ -598,6 +991,154 @@ async fn start_watcher(
 //  SECTION 6 — UTILITAIRES
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Calcule un score de risque simulé pour un token.
+///
+/// En production, cette fonction analyserait :
+/// - La mint authority (peut-elle mint de nouveaux tokens ?)
+/// - La freeze authority (peut-elle geler des comptes ?)
+/// - La concentration des holders (via getProgramAccounts)
+/// - L'historique du deployer wallet (via getSignaturesForAddress)
+/// - Si la liquidité est lockée (via un programme de lock comme Raydium)
+///
+/// C'est un composant critique pour éviter les honeypots et rug pulls.
+fn compute_risk_score(pair: &DexPair) -> RiskScore {
+    let mut score: i32 = 50; // Score de base neutre
+    let mut flags = Vec::new();
+
+    // 1. Vérifier la liquidité
+    let liq = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
+    if liq > 10_000.0 {
+        score += 15;
+        flags.push(RiskFlag {
+            name: "Liquidity".to_string(),
+            severity: "info".to_string(),
+            description: format!("Liquidity ${:.0} — sufficient for trading", liq),
+            passed: true,
+        });
+    } else if liq > 1_000.0 {
+        score += 5;
+        flags.push(RiskFlag {
+            name: "Liquidity".to_string(),
+            severity: "warning".to_string(),
+            description: format!("Liquidity ${:.0} — low, high slippage risk", liq),
+            passed: false,
+        });
+    } else {
+        score -= 20;
+        flags.push(RiskFlag {
+            name: "Liquidity".to_string(),
+            severity: "danger".to_string(),
+            description: format!("Liquidity ${:.0} — critical, possible honeypot", liq),
+            passed: false,
+        });
+    }
+
+    // 2. Vérifier le volume (activité de trading réelle)
+    let vol_h1 = pair.volume.as_ref().and_then(|v| v.h1).unwrap_or(0.0);
+    if vol_h1 > 5_000.0 {
+        score += 10;
+        flags.push(RiskFlag {
+            name: "Volume".to_string(),
+            severity: "info".to_string(),
+            description: format!("Vol 1h ${:.0} — active trading", vol_h1),
+            passed: true,
+        });
+    } else if vol_h1 > 0.0 {
+        flags.push(RiskFlag {
+            name: "Volume".to_string(),
+            severity: "warning".to_string(),
+            description: format!("Vol 1h ${:.0} — low activity", vol_h1),
+            passed: false,
+        });
+    } else {
+        score -= 15;
+        flags.push(RiskFlag {
+            name: "Volume".to_string(),
+            severity: "danger".to_string(),
+            description: "No trading volume — possible honeypot".to_string(),
+            passed: false,
+        });
+    }
+
+    // 3. Vérifier les transactions (ratio buy/sell)
+    let buys = pair.txns.as_ref()
+        .and_then(|t| t.h1.as_ref())
+        .and_then(|c| c.buys)
+        .unwrap_or(0) as f64;
+    let sells = pair.txns.as_ref()
+        .and_then(|t| t.h1.as_ref())
+        .and_then(|c| c.sells)
+        .unwrap_or(0) as f64;
+    let total_txns = buys + sells;
+
+    if total_txns > 50.0 {
+        score += 10;
+        let ratio = if total_txns > 0.0 { buys / total_txns } else { 0.5 };
+        flags.push(RiskFlag {
+            name: "Txn Activity".to_string(),
+            severity: "info".to_string(),
+            description: format!("{:.0} txns 1h, buy ratio {:.0}%", total_txns, ratio * 100.0),
+            passed: true,
+        });
+    } else if sells == 0.0 && buys > 5.0 {
+        score -= 25;
+        flags.push(RiskFlag {
+            name: "Sell Block".to_string(),
+            severity: "danger".to_string(),
+            description: "No sells detected — possible honeypot (can't sell)".to_string(),
+            passed: false,
+        });
+    }
+
+    // 4. Vérifier l'âge de la paire
+    let age_ms = pair.pair_created_at
+        .map(|t| Utc::now().timestamp_millis() as u64 - t)
+        .unwrap_or(0);
+    let age_hours = age_ms / (3600 * 1000);
+
+    if age_hours < 1 {
+        score -= 10;
+        flags.push(RiskFlag {
+            name: "Pool Age".to_string(),
+            severity: "warning".to_string(),
+            description: "Pool < 1h old — very new, higher risk".to_string(),
+            passed: false,
+        });
+    } else if age_hours > 6 {
+        score += 10;
+        flags.push(RiskFlag {
+            name: "Pool Age".to_string(),
+            severity: "info".to_string(),
+            description: format!("Pool {}h old — survived initial period", age_hours),
+            passed: true,
+        });
+    }
+
+    // 5. FDV check (Fully Diluted Valuation excessive = red flag)
+    let fdv = pair.fdv.unwrap_or(0.0);
+    if fdv > 100_000_000.0 {
+        score -= 15;
+        flags.push(RiskFlag {
+            name: "FDV".to_string(),
+            severity: "danger".to_string(),
+            description: format!("FDV ${:.0}M — unrealistically high", fdv / 1_000_000.0),
+            passed: false,
+        });
+    }
+
+    // Clamp score between 0 and 100
+    let score = score.clamp(0, 100) as u8;
+
+    let level = match score {
+        80..=100 => "SAFE",
+        60..=79  => "CAUTION",
+        30..=59  => "DANGER",
+        _        => "CRITICAL",
+    }.to_string();
+
+    RiskScore { score, level, flags }
+}
+
 /// Ajoute un LogEntry dans la liste partagée de façon thread-safe.
 ///
 /// Prend `&Arc<Mutex<...>>` (référence sur Arc) : on n'a pas besoin
@@ -611,6 +1152,57 @@ fn push_log(logs: &Arc<Mutex<Vec<LogEntry>>>, level: LogLevel, message: String) 
         message,
     });
     cap_logs(&mut guard);
+}
+
+/// Tâche de fond qui simule la mise à jour des stats réseau Solana.
+///
+/// En production, on interrogerait le RPC Solana :
+/// - `getRecentPerformanceSamples` pour le TPS
+/// - `getSlot` pour le slot courant
+/// - `getRecentPrioritizationFees` pour les priority fees
+/// - `getEpochInfo` pour l'epoch
+///
+/// Ces données sont essentielles pour ajuster dynamiquement les tips
+/// Jito et les priority fees de nos transactions.
+async fn start_network_watcher(
+    network_stats: Arc<RwLock<NetworkStats>>,
+) {
+    loop {
+        // Simuler des variations réalistes du réseau
+        {
+            let mut stats = network_stats.write().unwrap();
+
+            // TPS varie entre 2000 et 5000 (réaliste pour Solana)
+            let tps_delta: i64 = ((Utc::now().timestamp() % 7) - 3) * 100;
+            stats.tps = ((stats.tps as i64 + tps_delta).clamp(2000, 5000)) as u64;
+
+            // Slot avance d'environ 75 par 30s (2.5 slots/seconde)
+            stats.current_slot += 75;
+            stats.epoch = stats.current_slot / 432_000;
+
+            // Priority fee s'ajuste selon le "TPS" (congestion simulée)
+            stats.priority_fee_estimate = match stats.tps {
+                0..=2500     => 50_000,  // Très congestionné
+                2501..=3500  => 10_000,  // Modéré
+                3501..=4500  => 5_000,   // Normal
+                _            => 1_000,   // Peu chargé
+            };
+
+            stats.congestion_level = match stats.tps {
+                0..=2500     => "high".to_string(),
+                2501..=3500  => "medium".to_string(),
+                _            => "low".to_string(),
+            };
+
+            // Simuler une légère variation du prix SOL
+            let delta = ((Utc::now().timestamp() % 5) - 2) as f64 * 0.15;
+            stats.sol_price_usd = (stats.sol_price_usd + delta).clamp(130.0, 160.0);
+
+            stats.last_updated = Utc::now().format("%H:%M:%S").to_string();
+        }
+
+        sleep(Duration::from_secs(30)).await;
+    }
 }
 
 /// Garde le vecteur de logs sous la limite de 500 entrées.
@@ -651,49 +1243,43 @@ async fn main() -> std::io::Result<()> {
     info!("╚══════════════════════════════════════╝");
 
     // ── Initialisation de l'état partagé ──────────────────────────────────
-    // Arc::new(Mutex::new(vec![])) :
-    //   vec![]        → Vec<T> vide, alloué sur le heap
-    //   Mutex::new()  → enveloppe le Vec dans un verrou
-    //   Arc::new()    → enveloppe le Mutex dans un compteur atomique
-    //
-    // Coût mémoire : ~40 bytes pour l'Arc + ~8 bytes pour le Mutex + Vec.
-    // Très léger comparé à l'overhead d'un serveur HTTP classique.
     let opportunities: Arc<RwLock<Vec<Opportunity>>> = Arc::new(RwLock::new(Vec::new()));
     let logs:          Arc<Mutex<Vec<LogEntry>>>    = Arc::new(Mutex::new(Vec::new()));
+    let jito_config:   Arc<RwLock<JitoConfig>>     = Arc::new(RwLock::new(JitoConfig::default()));
+    let network_stats: Arc<RwLock<NetworkStats>>   = Arc::new(RwLock::new(NetworkStats::default()));
+    let snipe_history: Arc<Mutex<Vec<SnipeHistoryEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Le Client HTTP est thread-safe et conçu pour être réutilisé.
-    // Il gère en interne un pool de connexions TCP persistantes.
     let http_client = Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent("SniperBot/1.0 (PoC)")
         .build()
         .expect("Failed to build HTTP client");
 
-    // ── Cloner les Arc pour le Watcher ─────────────────────────────────────
-    // `Arc::clone(&x)` === `x.clone()` mais plus explicite sur l'intention :
-    // "je clone le POINTEUR, pas la donnée".
-    // Après ces lignes, les compteurs de références passent de 1 à 2.
+    // ── Cloner les Arc pour les tâches de fond ────────────────────────────
     let opps_watcher   = Arc::clone(&opportunities);
     let logs_watcher   = Arc::clone(&logs);
-    let client_watcher = http_client.clone(); // reqwest::Client implémente Clone
+    let client_watcher = http_client.clone();
+    let net_watcher    = Arc::clone(&network_stats);
 
-    // ── Lancer le Watcher en tâche de fond ────────────────────────────────
-    // `tokio::spawn` : Lance une tâche async concurrente.
-    // `move` : Transfère l'ownership des variables clonées DANS la closure.
-    // Sans `move`, Rust refuserait de compiler (durée de vie incertaine).
-    //
-    // La tâche tourne indéfiniment (loop sans break) en parallèle du serveur.
+    // ── Lancer le Watcher DexScreener en tâche de fond ────────────────────
     tokio::spawn(async move {
         start_watcher(opps_watcher, logs_watcher, client_watcher).await;
     });
 
+    // ── Lancer le Watcher Network Stats en tâche de fond ──────────────────
+    tokio::spawn(async move {
+        start_network_watcher(net_watcher).await;
+    });
+
     // ── Préparer l'AppState partagé pour Actix ────────────────────────────
-    // `web::Data::new(...)` emballe notre state dans un Arc<T> géré par Actix.
-    // Actix le clonera pour chaque worker thread (le compteur Arc monte encore).
     let app_state = web::Data::new(AppState {
         opportunities,
         logs,
         http_client,
+        jito_config,
+        network_stats,
+        snipe_history,
     });
 
     // ── Démarrer le serveur HTTP Actix-web ────────────────────────────────
@@ -705,7 +1291,7 @@ async fn main() -> std::io::Result<()> {
             .allowed_origin("http://localhost:3000")
             .allowed_origin("http://127.0.0.1:3000")
             .allowed_origin("http://localhost:5173") // Vite dev par défaut
-            .allowed_methods(vec!["GET", "POST", "DELETE", "OPTIONS"])
+            .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
             .allow_any_header()
             .max_age(3600);
 
@@ -717,6 +1303,15 @@ async fn main() -> std::io::Result<()> {
             .service(get_logs)
             .service(clear_logs)
             .service(simulate_snipe)
+            // Jito Bundles
+            .service(get_jito_config)
+            .service(update_jito_config)
+            // Jupiter DEX Aggregator
+            .service(get_jupiter_quote)
+            // Solana Network
+            .service(get_network_stats)
+            // Snipe History
+            .service(get_snipe_history)
     })
     .bind("0.0.0.0:8080")?
     .workers(2) // 2 worker threads Actix (suffisant pour un PoC)

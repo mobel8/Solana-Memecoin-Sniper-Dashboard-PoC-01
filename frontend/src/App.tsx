@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Zap, Wifi, WifiOff, RefreshCw, SlidersHorizontal } from 'lucide-react'
+import { Zap, Wifi, WifiOff, RefreshCw, SlidersHorizontal, Shield } from 'lucide-react'
 import TokenRow from './components/TokenRow'
 import LogPanel from './components/LogPanel'
 import StatsHeader from './components/StatsHeader'
 import ThemeSwitcher from './components/ThemeSwitcher'
+import TokenDetail from './components/TokenDetail'
+import NetworkBar from './components/NetworkBar'
+import JitoPanel from './components/JitoPanel'
 import { ThemeId, DEFAULT_THEME } from './themes'
 
 // ════════════════════════════════════════════════════════════════
@@ -36,6 +39,7 @@ export interface Opportunity {
   pair_created_at: number
   detected_at: string
   status: 'DETECTED' | 'SNIPED' | 'MISSED'
+  risk_score: RiskScore | null
 }
 
 export interface LogEntry {
@@ -43,6 +47,63 @@ export interface LogEntry {
   timestamp: string
   level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR'
   message: string
+}
+
+// ── Types Jito Bundles ──────────────────────────────────────────
+export interface JitoConfig {
+  tip_min_sol: number
+  tip_max_sol: number
+  block_engine: string
+  tip_strategy: string
+  max_txns_per_bundle: number
+  slippage_bps: number
+  anti_sandwich: boolean
+  compute_unit_limit: number
+  priority_fee_micro_lamports: number
+}
+
+// ── Types Network Stats ─────────────────────────────────────────
+export interface NetworkStats {
+  tps: number
+  current_slot: number
+  epoch: number
+  priority_fee_estimate: number
+  congestion_level: string
+  active_validators: number
+  sol_price_usd: number
+  last_updated: string
+}
+
+// ── Types Risk Score ────────────────────────────────────────────
+export interface RiskFlag {
+  name: string
+  severity: string
+  description: string
+  passed: boolean
+}
+
+export interface RiskScore {
+  score: number
+  level: string
+  flags: RiskFlag[]
+}
+
+// ── Types Snipe History ─────────────────────────────────────────
+export interface SnipeHistoryEntry {
+  id: string
+  timestamp: string
+  token_symbol: string
+  token_address: string
+  action: string
+  amount_sol: number
+  price_usd: number
+  tip_sol: number
+  bundle_id: string
+  block_engine: string
+  landing_slot: number
+  status: string
+  pnl_pct: number
+  simulation: boolean
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -57,6 +118,13 @@ export default function App() {
   const [isRefreshing,  setIsRefreshing]  = useState(false)
   // Token actuellement en cours de "snipe" (affiche l'animation)
   const [snipingToken,  setSnipingToken]  = useState<string | null>(null)
+  // Navigation vers la page de détail
+  const [detailAddress, setDetailAddress] = useState<string | null>(null)
+
+  // ── Données infrastructure ─────────────────────────────────────
+  const [networkStats, setNetworkStats] = useState<NetworkStats | null>(null)
+  const [jitoConfig,   setJitoConfig]   = useState<JitoConfig | null>(null)
+  const [showJitoPanel, setShowJitoPanel] = useState(false)
 
   // ── Thème (persisté dans localStorage) ─────────────────────────
   const [theme, setTheme] = useState<ThemeId>(
@@ -74,11 +142,12 @@ export default function App() {
   // à chaque re-render (dépendances vides → stable pour toute la vie du composant)
   const fetchData = useCallback(async () => {
     try {
-      // Promise.all : exécute les deux fetch EN PARALLÈLE (pas séquentiel)
-      // Réduit la latence perçue par l'utilisateur de ~2x
-      const [oppsRes, logsRes] = await Promise.all([
+      // Promise.all : exécute les fetch EN PARALLÈLE (pas séquentiel)
+      const [oppsRes, logsRes, netRes, jitoRes] = await Promise.all([
         fetch('/api/opportunities'),
         fetch('/api/logs'),
+        fetch('/api/network'),
+        fetch('/api/jito/config'),
       ])
 
       if (oppsRes.ok && logsRes.ok) {
@@ -93,8 +162,10 @@ export default function App() {
       } else {
         setIsConnected(false)
       }
+
+      if (netRes.ok)  setNetworkStats(await netRes.json())
+      if (jitoRes.ok) setJitoConfig(await jitoRes.json())
     } catch {
-      // Le backend n'est pas encore démarré ou est injoignable
       setIsConnected(false)
     }
   }, [])
@@ -132,6 +203,18 @@ export default function App() {
   const clearLogs = useCallback(async () => {
     await fetch('/api/logs', { method: 'DELETE' })
     setLogs([])
+  }, [])
+
+  // ── Update Jito config ────────────────────────────────────────
+  const updateJitoConfig = useCallback(async (newConfig: JitoConfig) => {
+    const res = await fetch('/api/jito/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newConfig),
+    })
+    if (res.ok) {
+      setJitoConfig(newConfig)
+    }
   }, [])
 
   // ── Filtre / Tri ────────────────────────────────────────────────
@@ -174,6 +257,18 @@ export default function App() {
   // ════════════════════════════════════════════════════════════════
   //  RENDU
   // ════════════════════════════════════════════════════════════════
+
+  // Page de détail d'un token
+  if (detailAddress) {
+    return (
+      <TokenDetail
+        tokenAddress={detailAddress}
+        onBack={() => setDetailAddress(null)}
+        onSnipe={handleSnipe}
+        isSniping={snipingToken === detailAddress}
+      />
+    )
+  }
 
   return (
     <div className="min-h-screen bg-terminal-bg font-mono text-terminal-text scanline-overlay">
@@ -232,6 +327,19 @@ export default function App() {
               Refresh
             </button>
 
+            {/* Jito Config */}
+            <button
+              onClick={() => setShowJitoPanel(!showJitoPanel)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs transition-colors ${
+                showJitoPanel
+                  ? 'border-terminal-green bg-terminal-green/10 text-terminal-green'
+                  : 'border-terminal-border text-terminal-muted hover:text-terminal-text hover:border-terminal-blue'
+              }`}
+            >
+              <Shield className="w-3.5 h-3.5" />
+              Jito
+            </button>
+
             {/* Sélecteur de thème */}
             <ThemeSwitcher currentTheme={theme} onThemeChange={setTheme} />
 
@@ -247,6 +355,14 @@ export default function App() {
 
       {/* ── BARRE DE STATISTIQUES ───────────────────────────────── */}
       <StatsHeader stats={stats} />
+
+      {/* ── BARRE RÉSEAU SOLANA ──────────────────────────────────── */}
+      {networkStats && <NetworkBar stats={networkStats} />}
+
+      {/* ── PANEL JITO CONFIG (collapsible) ──────────────────────── */}
+      {showJitoPanel && jitoConfig && (
+        <JitoPanel config={jitoConfig} onUpdate={updateJitoConfig} />
+      )}
 
       {/* ── BARRE FILTRE / TRI ──────────────────────────────────── */}
       <div className="border-b border-terminal-border bg-terminal-bg/40 px-4 py-2">
@@ -358,6 +474,7 @@ export default function App() {
                     opportunity={opp}
                     onSnipe={handleSnipe}
                     isSniping={snipingToken === opp.token_address}
+                    onViewDetail={setDetailAddress}
                   />
                 ))
               )}
